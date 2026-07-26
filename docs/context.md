@@ -6,20 +6,22 @@ Build a real-time governance layer for autonomous financial agents.
 
 ## Current milestone
 
-Integrating the React operator dashboard with the FastAPI enforcement gateway.
+Completing integration between the Vinext operator dashboard in `prototype/`
+and the FastAPI enforcement gateway.
 
 ## What currently works
 
 - Intent-bound permissions
 - Per-action and daily limits
 - Human-review decisions
-- Agent revocation and fleet stop
+- Agent revocation, restoration, and fleet stop
 - Tamper-evident audit chain
 - FastAPI governance gateway and OpenAPI documentation
 - Atomic budget reserve, commit, release, and expiry lifecycle
 - Idempotent action authorization
 - Fleet-epoch invalidation of outstanding execution leases
 - Domain, concurrency, regression, and API tests
+- Vinext operator dashboard under `prototype/` on `main`
 
 ## Architecture decisions
 
@@ -62,7 +64,9 @@ lifecycle so the policy check and budget hold are atomic.
 - [x] Implement budget reservation lifecycle
 - [x] Add authorization leases and idempotency
 - [x] Add concurrency tests
-- [ ] Build dashboard shell
+- [x] Build dashboard shell
+- [x] Add configurable dashboard CORS origins
+- [x] Add agent restoration to the engine and API
 - [ ] Implement human approval workflow
 - [ ] Add PostgreSQL and Redis adapters
 
@@ -70,8 +74,8 @@ lifecycle so the policy check and budget hold are atomic.
 
 | Area | Owner | Branch | Status |
 |---|---|---|---|
-| FastAPI gateway | Backend owner | api-gateway | Implemented locally |
-| React dashboard | Frontend owner | feature/dashboard | Planned |
+| FastAPI gateway | Backend owner | api-gateway | Ready for integration |
+| Vinext dashboard | Frontend owner | main (`prototype/`) | Implemented |
 
 ## Running the project
 
@@ -95,10 +99,17 @@ OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 Standard Windows Python installations use `.venv\Scripts` instead of
 `.venv\bin`.
 
+Browser origins are configured through the comma-separated
+`INTENTGUARD_CORS_ORIGINS` environment variable. Defaults cover the dashboard
+on ports 3000 and 5173 for both `localhost` and `127.0.0.1`.
+
 ## Change log
 
 ### 2026-07-27
 
+- Added configurable CORS origins and the Vinext port 3000 defaults.
+- Added agent restoration with an API endpoint, audit event, and tests.
+- Updated shared context for the dashboard now present under `prototype/`.
 - Added the FastAPI governance gateway and frontend-safe CORS configuration.
 - Added atomic budget holds with commit, release, and automatic expiry.
 - Added idempotent request handling and request-data conflict detection.

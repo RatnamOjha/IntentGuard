@@ -118,6 +118,23 @@ class PolicyEngineTest(unittest.TestCase):
             {finding.code for finding in result.findings},
         )
 
+    def test_restored_agent_can_act_again_and_is_audited(self) -> None:
+        self.engine.revoke_agent("travel-01")
+        self.engine.restore_agent("travel-01")
+
+        result = self.engine.evaluate(self.action(), now=self.now)
+
+        self.assertEqual(Decision.ALLOW, result.decision)
+        self.assertEqual("agent.restored", self.engine.audit_ledger.events[-2].event_type)
+        self.assertEqual(
+            "travel-01",
+            self.engine.audit_ledger.events[-2].payload["agent_id"],
+        )
+
+    def test_restoring_unknown_agent_fails(self) -> None:
+        with self.assertRaises(KeyError):
+            self.engine.restore_agent("unknown-agent")
+
     def test_fleet_stop_blocks_valid_action(self) -> None:
         self.engine.stop_fleet(reason="Incident response")
         result = self.engine.evaluate(self.action(), now=self.now)

@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -97,6 +98,68 @@ class ApiTest(unittest.TestCase):
         event_types = {event["event_type"] for event in response.json()}
         self.assertIn("policy.evaluated", event_types)
         self.assertIn("budget.reserved", event_types)
+
+    def test_agent_can_be_revoked_and_restored(self) -> None:
+        revoked = self.client.post("/v1/agents/travel-01/revoke")
+        self.assertEqual(204, revoked.status_code)
+        denied = self.client.post(
+            "/v1/actions/authorize", json=self.action("request-revoked")
+        )
+        self.assertEqual("deny", denied.json()["decision"]["decision"])
+
+        restored = self.client.post("/v1/agents/travel-01/restore")
+        self.assertEqual(204, restored.status_code)
+        allowed = self.client.post(
+            "/v1/actions/authorize", json=self.action("request-restored")
+        )
+        self.assertEqual("allow", allowed.json()["decision"]["decision"])
+
+        events = self.client.get("/v1/audit/events").json()
+        self.assertIn("agent.restored", {event["event_type"] for event in events})
+
+    def test_restore_unknown_agent_returns_not_found(self) -> None:
+        response = self.client.post("/v1/agents/unknown-agent/restore")
+        self.assertEqual(404, response.status_code)
+
+    def test_default_cors_allows_vinext_dashboard(self) -> None:
+        for origin in (
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ):
+            with self.subTest(origin=origin):
+                response = self.client.options(
+                    "/health",
+                    headers={
+                        "Origin": origin,
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(
+                    origin,
+                    response.headers["access-control-allow-origin"],
+                )
+
+    def test_cors_origins_can_be_configured(self) -> None:
+        from intentguard.api import create_app
+
+        with patch.dict(
+            "os.environ",
+            {"INTENTGUARD_CORS_ORIGINS": "https://console.example.test"},
+        ):
+            client = TestClient(create_app(PolicyEngine()))
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "https://console.example.test",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            "https://console.example.test",
+            response.headers["access-control-allow-origin"],
+        )
 
 
 if __name__ == "__main__":

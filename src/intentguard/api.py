@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -13,6 +14,23 @@ from pydantic import BaseModel, Field
 
 from .models import ActionRequest, AgentProfile, IntentPassport
 from .policy_engine import PolicyEngine
+
+
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def configured_cors_origins() -> tuple[str, ...]:
+    """Read a comma-separated origin allowlist, falling back to local UIs."""
+
+    configured = os.getenv("INTENTGUARD_CORS_ORIGINS")
+    if configured is None:
+        return DEFAULT_CORS_ORIGINS
+    return tuple(origin.strip() for origin in configured.split(",") if origin.strip())
 
 
 class AgentCreate(BaseModel):
@@ -59,7 +77,11 @@ class FleetStop(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
-def create_app(engine: PolicyEngine | None = None) -> FastAPI:
+def create_app(
+    engine: PolicyEngine | None = None,
+    *,
+    allowed_origins: tuple[str, ...] | list[str] | None = None,
+) -> FastAPI:
     """Create an application with an injectable engine for tests and deployment."""
 
     app = FastAPI(
@@ -70,9 +92,14 @@ def create_app(engine: PolicyEngine | None = None) -> FastAPI:
             "APIs for autonomous financial agents."
         ),
     )
+    cors_origins = (
+        tuple(allowed_origins)
+        if allowed_origins is not None
+        else configured_cors_origins()
+    )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=list(cors_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -198,6 +225,17 @@ def create_app(engine: PolicyEngine | None = None) -> FastAPI:
     )
     def revoke_agent(agent_id: str) -> None:
         governance_engine().revoke_agent(agent_id)
+
+    @app.post(
+        "/v1/agents/{agent_id}/restore",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["agents"],
+    )
+    def restore_agent(agent_id: str) -> None:
+        try:
+            governance_engine().restore_agent(agent_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post(
         "/v1/fleet/stop",

@@ -101,6 +101,19 @@ class PolicyEngine:
                         reason="agent_revoked",
                     )
 
+    def restore_agent(self, agent_id: str) -> None:
+        """Remove an agent's runtime revocation without changing its profile."""
+
+        with self._lock:
+            if agent_id not in self._agents:
+                raise KeyError(f"Unknown agent: {agent_id}")
+            was_revoked = agent_id in self._revoked_agents
+            self._revoked_agents.discard(agent_id)
+            self.audit_ledger.append(
+                "agent.restored",
+                {"agent_id": agent_id, "was_revoked": was_revoked},
+            )
+
     def stop_fleet(self, *, reason: str) -> None:
         with self._lock:
             self._fleet_stopped = True

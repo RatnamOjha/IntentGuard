@@ -93,6 +93,13 @@ Then open `http://127.0.0.1:8000/docs`. The shared frontend contract is in
 With the standard Windows Python distribution, replace `.venv\bin` with
 `.venv\Scripts` in these commands.
 
+The API accepts the Vinext dashboard origins on ports 3000 and 5173 by default.
+For deployed environments, set a comma-separated allowlist:
+
+```powershell
+$env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
+```
+
 ## Demo scenarios
 
 The example evaluates four actions:
