@@ -27,8 +27,8 @@ customer authorized only refundable tickets below INR 18,000.
 
 ## Current milestone
 
-The repository currently contains a dependency-light Python domain core that
-demonstrates:
+The repository contains a dependency-light Python domain core and a FastAPI
+governance gateway that demonstrate:
 
 - registered-agent and action-level permissions;
 - intent-bound amount, currency, and contextual constraints;
@@ -37,6 +37,9 @@ demonstrates:
 - individual-agent revocation;
 - an emergency fleet stop;
 - hash-chained audit events with integrity verification.
+- concurrency-safe budget reservations and short-lived execution leases;
+- fleet-epoch invalidation of outstanding authorizations;
+- a frontend-ready REST and OpenAPI contract.
 
 ## Locked prototype stack
 
@@ -72,6 +75,29 @@ Requires Python 3.9 or newer.
 ```bash
 python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 examples/demo.py
+```
+
+On Windows PowerShell, install and run the API with:
+
+```powershell
+python -m venv .venv
+# This laptop's MSYS Python creates .venv/bin rather than .venv/Scripts.
+& .\.venv\bin\python.exe -m pip install -e ".[api,dev]"
+& .\.venv\bin\python.exe -m unittest discover -s tests -v
+& .\.venv\bin\python.exe -m uvicorn intentguard.api:app --reload
+```
+
+Then open `http://127.0.0.1:8000/docs`. The shared frontend contract is in
+[`docs/api-contract.md`](docs/api-contract.md).
+
+With the standard Windows Python distribution, replace `.venv\bin` with
+`.venv\Scripts` in these commands.
+
+The API accepts the Vinext dashboard origins on ports 3000 and 5173 by default.
+For deployed environments, set a comma-separated allowlist:
+
+```powershell
+$env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
 ```
 
 ## Demo scenarios
