@@ -6,17 +6,20 @@ Build a real-time governance layer for autonomous financial agents.
 
 ## Current milestone
 
-Building the FastAPI enforcement gateway and concurrency-safe budget system.
+Integrating the React operator dashboard with the FastAPI enforcement gateway.
 
 ## What currently works
 
 - Intent-bound permissions
 - Per-action and daily limits
 - Human-review decisions
-- Agent revocation
-- Fleet stop
+- Agent revocation and fleet stop
 - Tamper-evident audit chain
-- Eight passing unit tests
+- FastAPI governance gateway and OpenAPI documentation
+- Atomic budget reserve, commit, release, and expiry lifecycle
+- Idempotent action authorization
+- Fleet-epoch invalidation of outstanding execution leases
+- Domain, concurrency, regression, and API tests
 
 ## Architecture decisions
 
@@ -30,37 +33,81 @@ Agents cannot call protected financial APIs directly.
 
 ### 2026-07-26 — Budget reservations
 
-Financial actions will reserve budget before execution and commit or release it
+Financial actions reserve budget before execution and commit or release it
 after the connector reports an outcome.
+
+### 2026-07-27 — Short-lived execution leases
+
+An allowed action receives an opaque, short-lived lease bound to its request,
+reservation, agent, and current fleet epoch. Protected connectors must commit
+with this lease; a fleet stop increments the epoch and invalidates old work.
+
+### 2026-07-27 — Backward-compatible domain evolution
+
+The original `evaluate` and `record_execution` methods remain available for the
+demo. Production-facing API calls use `authorize_action` and the reservation
+lifecycle so the policy check and budget hold are atomic.
 
 ## Current technical limitations
 
 - State is held in memory.
-- Budget enforcement is not concurrency-safe.
-- No HTTP API exists yet.
-- No persistent database exists yet.
 - Human review is represented as a decision but has no workflow.
-- Fleet stop does not invalidate previously issued authorizations.
+- Execution leases are opaque IDs rather than cryptographically signed tokens.
+- In-memory locking protects one process; Redis will coordinate multiple replicas.
 
 ## Immediate next tasks
 
-- [ ] Create FastAPI application
-- [ ] Define API request and response models
-- [ ] Implement budget reservation lifecycle
-- [ ] Add authorization leases and idempotency
-- [ ] Add concurrency tests
+- [x] Create FastAPI application
+- [x] Define API request and response models
+- [x] Implement budget reservation lifecycle
+- [x] Add authorization leases and idempotency
+- [x] Add concurrency tests
 - [ ] Build dashboard shell
+- [ ] Implement human approval workflow
+- [ ] Add PostgreSQL and Redis adapters
 
 ## Work ownership
 
 | Area | Owner | Branch | Status |
 |---|---|---|---|
-| FastAPI gateway | Name | feature/api-gateway | Planned |
-| React dashboard | Name | feature/dashboard | Planned |
+| FastAPI gateway | Backend owner | api-gateway | Implemented locally |
+| React dashboard | Frontend owner | feature/dashboard | Planned |
 
 ## Running the project
+
+Run the dependency-light domain tests and demo:
 
 ```powershell
 python -m unittest discover -s tests -v
 $env:PYTHONPATH="src"
 python examples\demo.py
+```
+
+Install and run the API:
+
+```powershell
+python -m venv .venv
+& .\.venv\bin\python.exe -m pip install -e ".[api,dev]"
+& .\.venv\bin\python.exe -m uvicorn intentguard.api:app --reload
+```
+
+OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+Standard Windows Python installations use `.venv\Scripts` instead of
+`.venv\bin`.
+
+## Change log
+
+### 2026-07-27
+
+- Added the FastAPI governance gateway and frontend-safe CORS configuration.
+- Added atomic budget holds with commit, release, and automatic expiry.
+- Added idempotent request handling and request-data conflict detection.
+- Added fleet epochs so an emergency stop invalidates outstanding leases.
+- Added concurrency and API integration tests.
+- Documented the frontend/backend contract in `docs/api-contract.md`.
+
+### 2026-07-26
+
+- Initialized the IntentGuard domain foundation.
+- Added policy evaluation, intent passports, revocation, and audit chaining.
+- Added the initial architecture and product roadmap.

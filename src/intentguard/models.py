@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -15,6 +15,15 @@ class Decision(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
     REVIEW = "review"
+
+
+class ReservationStatus(str, Enum):
+    """Lifecycle states for an atomic budget reservation."""
+
+    HELD = "held"
+    COMMITTED = "committed"
+    RELEASED = "released"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True)
@@ -85,3 +94,42 @@ class DecisionRecord:
     @property
     def explanation(self) -> str:
         return " ".join(finding.message for finding in self.findings)
+
+
+@dataclass(frozen=True)
+class BudgetReservation:
+    """Funds held against an agent budget before external execution."""
+
+    reservation_id: str
+    request_id: str
+    agent_id: str
+    amount: Decimal
+    currency: str
+    budget_date: date
+    expires_at: datetime
+    status: ReservationStatus = ReservationStatus.HELD
+
+
+@dataclass(frozen=True)
+class AuthorizationLease:
+    """Short-lived, single-use authorization bound to a fleet epoch."""
+
+    lease_id: str
+    request_id: str
+    agent_id: str
+    reservation_id: str
+    fleet_epoch: int
+    issued_at: datetime
+    expires_at: datetime
+
+    def is_expired(self, now: datetime) -> bool:
+        return now >= self.expires_at
+
+
+@dataclass(frozen=True)
+class AuthorizationResult:
+    """Policy decision plus execution artifacts when an action is allowed."""
+
+    decision: DecisionRecord
+    reservation: BudgetReservation | None = None
+    lease: AuthorizationLease | None = None
