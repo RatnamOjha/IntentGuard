@@ -13,5 +13,7 @@ venv/
 .DS_Store
 dist/
 build/
+!prototype/build/
+!prototype/build/**
 *.egg-info/
-
+.pnpm-store/

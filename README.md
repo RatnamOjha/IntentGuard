@@ -38,6 +38,33 @@ demonstrates:
 - an emergency fleet stop;
 - hash-chained audit events with integrity verification.
 
+## Locked prototype stack
+
+The listed challenge technologies are examples rather than requirements. We are
+using one coherent stack instead of attempting to use every suggested product:
+
+| Layer | Selected technology | Responsibility |
+| --- | --- | --- |
+| Operator UI | React, TypeScript, Vite | Policies, budgets, fleet controls, activity, and audit review |
+| Governance API | FastAPI, Python | Enforcement gateway and operator APIs |
+| Policy decisions | Open Policy Agent, Rego | Granular permission and contextual policy evaluation |
+| Durable state | PostgreSQL | Agents, policies, budgets, approvals, and audit metadata |
+| Runtime state | Redis | Atomic reservations, counters, revocation epochs, and fleet-stop state |
+| Monitoring | Prometheus, Grafana | Latency, decisions, policy failures, and fleet health |
+| Enterprise export | Splunk-compatible HTTP event export | Optional downstream security and audit integration |
+| Local runtime | Docker Compose | Reproducible end-to-end prototype |
+| Deployment path | AWS | ECS/Fargate, RDS, ElastiCache, and managed secrets |
+
+## Challenge task coverage
+
+| Required task | IntentGuard implementation |
+| --- | --- |
+| Granular agent permissions | Agent registry plus versioned OPA/Rego policies |
+| Dynamic spend caps | Atomic reserve/commit/release budget engine backed by Redis |
+| Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
+| Operator dashboard | React console for policy, budget, activity, controls, and audit |
+| Accuracy, latency, and auditability | Policy test suites, load tests, Prometheus metrics, and a hash-chained audit trail |
+
 ## Quick start
 
 Requires Python 3.9 or newer.
@@ -85,8 +112,10 @@ The example evaluates four actions:
 ### Prototype
 
 - FastAPI governance gateway
-- React operator console
-- Policy configuration and simulation
+- React and TypeScript operator console
+- OPA/Rego policy configuration and simulation
+- PostgreSQL durable state
+- Redis runtime budgets and revocation state
 - Three mocked agents: travel, servicing, and benefits
 - Human approval queue
 - Real-time fleet monitoring and audit replay
