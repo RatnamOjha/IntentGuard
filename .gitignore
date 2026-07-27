@@ -17,3 +17,6 @@ build/
 !prototype/build/**
 *.egg-info/
 .pnpm-store/
+
+# Local demo script
+/docs/demo-script.md
