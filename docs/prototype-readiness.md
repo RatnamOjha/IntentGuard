@@ -10,7 +10,7 @@ prototype evidence.
 | Dynamic decision trace | Identity, intent, permission, budget, risk, and connector stages render pass, review, or fail from backend finding codes | Frontend build, lint, and render test |
 | No misleading placeholders | Navigation scrolls to functional workspaces, audit export downloads JSON evidence, and integrations are labeled running-now or production-roadmap | Frontend build and render test |
 | Reliable startup | One-command macOS/Linux and Windows launchers use the correct source path, reload scope, CORS defaults, and pinned Python dependencies | `scripts/start-demo.*`, shell syntax check |
-| Measured evaluation evidence | Backend runs labeled accuracy, p50/p95/p99 latency, concurrent budget race, and audit integrity checks | `test_benchmark_is_reproducible_and_safe` |
+| Measured evaluation evidence | Backend runs 27 deterministic acceptance controls and in-process engine percentiles; the dashboard separately measures browser-to-FastAPI p50/p95/p99 latency, a concurrent budget race, and audit integrity | `test_benchmark_is_reproducible_and_safe`, `test_authorization_probe_uses_isolated_full_policy_path` |
 | Readability | Findings, event rows, metrics, configuration controls, and evidence labels use presentation-legible sizing and responsive layouts | Frontend production build |
 | Submission demo | A timed 90-second narration, interaction sequence, and four-image capture list are prepared separately from the repository | Submission recording checklist |
 

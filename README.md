@@ -72,7 +72,7 @@ Splunk, Docker Compose, and AWS are explicit production-roadmap components.
 | Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
 | Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | Reproducible benchmark, concurrency tests, measured percentiles, and a hash-chained audit trail |
+| Accuracy, latency, and auditability | 27-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
 
 ## Quick start
 
@@ -102,7 +102,8 @@ Run every backend and frontend check with:
 
 The Windows equivalent is `.\scripts\test-all.ps1`.
 
-Generate reproducible accuracy, latency, concurrency, and audit evidence with:
+Generate reproducible acceptance, in-process engine latency, concurrency, and
+audit evidence with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m intentguard.benchmark

@@ -226,9 +226,33 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual(100.0, body["accuracy_percent"])
+        self.assertGreaterEqual(body["acceptance"]["total"], 20)
+        self.assertEqual(
+            body["acceptance"]["total"],
+            body["acceptance"]["passed"],
+        )
+        self.assertEqual(0, body["acceptance"]["failed"])
+        self.assertEqual(
+            "in_process_policy_engine",
+            body["engine_latency_ms"]["scope"],
+        )
         self.assertEqual(0, body["concurrency"]["overspend_violations"])
         self.assertTrue(body["audit_chain_verified"])
+
+    def test_authorization_probe_uses_isolated_full_policy_path(self) -> None:
+        response = self.client.post(
+            "/v1/demo/benchmark/authorize-probe",
+            json={"request_id": "api-probe-01"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("allow", response.json()["decision"])
+        self.assertGreaterEqual(response.json()["server_processing_ms"], 0)
+        agent_ids = {
+            agent["agent_id"] for agent in self.client.get("/v1/agents").json()
+        }
+        self.assertEqual({"travel-01"}, agent_ids)
+        self.assertNotIn("benchmark-agent", agent_ids)
 
     def test_agent_can_be_revoked_and_restored(self) -> None:
         revoked = self.client.post("/v1/agents/travel-01/revoke")

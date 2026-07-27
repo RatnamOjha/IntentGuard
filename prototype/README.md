@@ -13,7 +13,8 @@ The console demonstrates:
 - append-only audit events and enforcement latency.
 - live versioned permission and budget configuration;
 - protected-connector rejection of stale execution leases;
-- reproducible accuracy, latency, concurrency, and audit evidence.
+- 27-control acceptance coverage, separate engine/API latency measurements,
+  concurrency safety, and audit evidence.
 
 All interactions call the FastAPI governance gateway. The console bootstraps a
 deterministic three-agent sandbox, evaluates scenarios through the real policy

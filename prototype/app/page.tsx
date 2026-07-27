@@ -10,6 +10,7 @@ import {
   type ApiAuditStatus,
   type ApiAuthorization,
   type ApiBenchmark,
+  type ApiRoundTripBenchmark,
   authorizeAction,
   bootstrapDemo,
   commitAuthorization,
@@ -21,6 +22,7 @@ import {
   getFleetStatus,
   resetDemo,
   resolveApproval,
+  runApiRoundTripBenchmark,
   setAgentRevocation,
   setFleetStop,
   updateAgentPolicy,
@@ -359,6 +361,8 @@ export default function Home() {
   >("connecting");
   const [isWorking, setIsWorking] = useState(false);
   const [benchmark, setBenchmark] = useState<ApiBenchmark | null>(null);
+  const [apiRoundTrip, setApiRoundTrip] =
+    useState<ApiRoundTripBenchmark | null>(null);
   const [selectedPolicyAgentId, setSelectedPolicyAgentId] =
     useState("agt_travel_01");
   const selectedPolicyAgentRef = useRef("agt_travel_01");
@@ -385,15 +389,6 @@ export default function Home() {
     }),
     [events, pendingApprovals.length],
   );
-  const p95Latency = useMemo(() => {
-    const samples = events
-      .map((event) => Number.parseFloat(event.latency))
-      .filter(Number.isFinite)
-      .sort((a, b) => a - b);
-    if (!samples.length) return "—";
-    return samples[Math.ceil(samples.length * 0.95) - 1].toFixed(2);
-  }, [events]);
-
   const refreshData = useCallback(async () => {
     const [apiAgents, fleet, apiApprovals, auditEvents, status] = await Promise.all([
       getAgents(),
@@ -434,6 +429,8 @@ export default function Home() {
         await bootstrapDemo();
         const measuredBenchmark = await getBenchmark();
         setBenchmark(measuredBenchmark);
+        const measuredApiRoundTrip = await runApiRoundTripBenchmark();
+        setApiRoundTrip(measuredApiRoundTrip);
         await refreshData();
       } catch (error) {
         setConnectionState("offline");
@@ -685,8 +682,10 @@ export default function Home() {
     try {
       const evidence = await getBenchmark();
       setBenchmark(evidence);
+      const measuredApiRoundTrip = await runApiRoundTripBenchmark();
+      setApiRoundTrip(measuredApiRoundTrip);
       setNotice(
-        `${evidence.iterations.toLocaleString("en-IN")} evaluations completed with ${evidence.concurrency.overspend_violations} overspend violations.`,
+        `${evidence.acceptance.passed}/${evidence.acceptance.total} acceptance controls passed; ${measuredApiRoundTrip.iterations} API round trips measured.`,
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Benchmark failed.");
@@ -710,6 +709,7 @@ export default function Home() {
               exported_at: new Date().toISOString(),
               audit_status: status,
               benchmark: evidence,
+              api_round_trip_latency: apiRoundTrip,
               events: auditEvents,
             },
             null,
@@ -909,15 +909,15 @@ export default function Home() {
           <div className="decision-latency">
             <div className="latency-ring">
               <span>p95</span>
-              <strong>{benchmark?.latency_ms.p95 ?? p95Latency}</strong>
+              <strong>{apiRoundTrip?.p95 ?? "—"}</strong>
               <small>milliseconds</small>
             </div>
             <div className="latency-copy">
-              <strong>Measured gateway latency</strong>
+              <strong>Measured API round-trip p95</strong>
               <small>
-                {benchmark
-                  ? `${benchmark.iterations.toLocaleString("en-IN")} deterministic evaluations`
-                  : "Derived from live API decisions"}
+                {apiRoundTrip
+                  ? `${apiRoundTrip.iterations} browser → FastAPI authorization requests`
+                  : "Waiting for browser-to-API measurements"}
               </small>
             </div>
           </div>
@@ -939,7 +939,7 @@ export default function Home() {
               <strong>{summary.allowed.toLocaleString("en-IN")}</strong>
               <span className="metric-note positive">
                 {benchmark
-                  ? `${benchmark.accuracy_percent}% labeled accuracy`
+                  ? `${benchmark.acceptance.passed}/${benchmark.acceptance.total} acceptance controls pass`
                   : "Backend decisions executed"}
               </span>
             </div>
@@ -1397,14 +1397,23 @@ export default function Home() {
               <>
                 <div className="evidence-metrics">
                   <div>
-                    <span>LABELED ACCURACY</span>
-                    <strong>{benchmark.accuracy_percent}%</strong>
-                    <small>{benchmark.labeled_scenarios} policy boundaries</small>
+                    <span>ACCEPTANCE SUITE</span>
+                    <strong>
+                      {benchmark.acceptance.passed}/{benchmark.acceptance.total}
+                    </strong>
+                    <small>
+                      {benchmark.acceptance.category_count} control categories ·{" "}
+                      {benchmark.acceptance.failed} failures
+                    </small>
                   </div>
                   <div>
-                    <span>P95 LATENCY</span>
-                    <strong>{benchmark.latency_ms.p95} ms</strong>
-                    <small>{benchmark.iterations.toLocaleString("en-IN")} evaluations</small>
+                    <span>API ROUND-TRIP P95</span>
+                    <strong>{apiRoundTrip ? `${apiRoundTrip.p95} ms` : "—"}</strong>
+                    <small>
+                      {apiRoundTrip
+                        ? `${apiRoundTrip.iterations} browser → FastAPI authorizations`
+                        : "Measurement pending"}
+                    </small>
                   </div>
                   <div>
                     <span>OVERSPEND VIOLATIONS</span>
@@ -1420,9 +1429,16 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="percentile-row">
-                  <span>p50 {benchmark.latency_ms.p50} ms</span>
-                  <span>p95 {benchmark.latency_ms.p95} ms</span>
-                  <span>p99 {benchmark.latency_ms.p99} ms</span>
+                  <span>
+                    In-process engine p50 {benchmark.engine_latency_ms.p50} ms
+                  </span>
+                  <span>p95 {benchmark.engine_latency_ms.p95} ms</span>
+                  <span>p99 {benchmark.engine_latency_ms.p99} ms</span>
+                  {apiRoundTrip ? (
+                    <span>
+                      API p50 {apiRoundTrip.p50} · p99 {apiRoundTrip.p99} ms
+                    </span>
+                  ) : null}
                   <span>
                     Reserved {formatCurrency(benchmark.concurrency.reserved_total)} /{" "}
                     {formatCurrency(benchmark.concurrency.budget)}

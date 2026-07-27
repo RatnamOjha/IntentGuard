@@ -69,9 +69,17 @@ export type ApiAuditStatus = {
 
 export type ApiBenchmark = {
   iterations: number;
-  labeled_scenarios: number;
-  accuracy_percent: number;
-  latency_ms: {
+  acceptance: {
+    total: number;
+    passed: number;
+    failed: number;
+    category_count: number;
+    categories: string[];
+    failures: Array<Record<string, unknown>>;
+    results: Array<Record<string, unknown>>;
+  };
+  engine_latency_ms: {
+    scope: "in_process_policy_engine";
     p50: number;
     p95: number;
     p99: number;
@@ -84,6 +92,14 @@ export type ApiBenchmark = {
     overspend_violations: number;
   };
   audit_chain_verified: boolean;
+};
+
+export type ApiRoundTripBenchmark = {
+  scope: "browser_to_fastapi_authorization";
+  iterations: number;
+  p50: number;
+  p95: number;
+  p99: number;
 };
 
 export type ActionPayload = {
@@ -152,6 +168,60 @@ export function getAuditStatus() {
 
 export function getBenchmark() {
   return apiRequest<ApiBenchmark>("/v1/demo/benchmark");
+}
+
+function percentile(values: number[], percentileValue: number) {
+  const ordered = [...values].sort((left, right) => left - right);
+  const index = Math.max(
+    0,
+    Math.min(
+      ordered.length - 1,
+      Math.round((ordered.length - 1) * percentileValue),
+    ),
+  );
+  return ordered[index];
+}
+
+export async function runApiRoundTripBenchmark(
+  iterations = 25,
+): Promise<ApiRoundTripBenchmark> {
+  if (!Number.isInteger(iterations) || iterations < 1) {
+    throw new Error("API benchmark iterations must be a positive integer.");
+  }
+
+  const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const probe = (index: number, phase: string) =>
+    apiRequest<{ decision: ApiDecision; server_processing_ms: number }>(
+      "/v1/demo/benchmark/authorize-probe",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          request_id: `probe-${runId}-${phase}-${index}`,
+        }),
+      },
+    );
+
+  for (let index = 0; index < 3; index += 1) {
+    await probe(index, "warmup");
+  }
+
+  const samples: number[] = [];
+  for (let index = 0; index < iterations; index += 1) {
+    const startedAt = performance.now();
+    const response = await probe(index, "measured");
+    if (response.decision !== "allow") {
+      throw new Error("The API authorization probe did not receive an allow decision.");
+    }
+    samples.push(performance.now() - startedAt);
+  }
+
+  return {
+    scope: "browser_to_fastapi_authorization",
+    iterations,
+    p50: Number(percentile(samples, 0.5).toFixed(3)),
+    p95: Number(percentile(samples, 0.95).toFixed(3)),
+    p99: Number(percentile(samples, 0.99).toFixed(3)),
+  };
 }
 
 export function authorizeAction(payload: ActionPayload) {

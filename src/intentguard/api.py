@@ -13,7 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .benchmark import run_benchmark
+from .benchmark import api_probe_request, create_api_probe_engine, run_benchmark
 from .models import ActionRequest, AgentProfile, IntentPassport
 from .policy_engine import PolicyEngine
 
@@ -93,6 +93,10 @@ class FleetStop(BaseModel):
 class ApprovalResolution(BaseModel):
     reviewer: str = Field(min_length=1, max_length=100)
     reason: str = Field(min_length=1, max_length=500)
+
+
+class BenchmarkProbe(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
 
 
 def seed_demo_engine(engine: PolicyEngine) -> None:
@@ -260,6 +264,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.state.engine = engine or PolicyEngine()
+    app.state.benchmark_probe_engine = create_api_probe_engine()
     app.state.demo_bootstrapped = False
 
     def governance_engine() -> PolicyEngine:
@@ -564,6 +569,23 @@ def create_app(
     @app.get("/v1/demo/benchmark", tags=["demo", "operations"])
     def demo_benchmark() -> dict[str, Any]:
         return jsonable_encoder(run_benchmark())
+
+    @app.post(
+        "/v1/demo/benchmark/authorize-probe",
+        tags=["demo", "operations"],
+    )
+    def demo_authorization_probe(payload: BenchmarkProbe) -> dict[str, Any]:
+        """Exercise the full FastAPI authorization path using isolated state."""
+
+        started_at = perf_counter()
+        result = app.state.benchmark_probe_engine.authorize_action(
+            api_probe_request(payload.request_id)
+        )
+        server_processing_ms = round((perf_counter() - started_at) * 1000, 4)
+        return {
+            "decision": result.decision.decision.value,
+            "server_processing_ms": server_processing_ms,
+        }
 
     return app
 

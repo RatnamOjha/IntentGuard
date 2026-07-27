@@ -67,10 +67,11 @@ would reduce prototype quality.
 
 ### Evaluation
 
-- Policy decision accuracy against a labeled scenario suite.
+- Policy decisions against a deterministic adversarial acceptance suite.
 - Budget race-condition and overspend tests.
 - Revocation propagation time.
-- Gateway p50, p95, and p99 latency.
+- Separate in-process policy-engine and browser-to-FastAPI p50, p95, and p99
+  latency.
 - Audit completeness and chain verification.
 - Failure-mode behavior when OPA, Redis, or PostgreSQL is unavailable.
 

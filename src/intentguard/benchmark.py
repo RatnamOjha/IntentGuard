@@ -1,4 +1,4 @@
-"""Reproducible policy accuracy, latency, and concurrency evidence."""
+"""Reproducible policy, latency, concurrency, and audit evidence."""
 
 from __future__ import annotations
 
@@ -19,9 +19,16 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _configured_engine(*, daily_budget: str = "100000") -> tuple[
-    PolicyEngine, datetime
-]:
+def _configured_engine(
+    *,
+    daily_budget: str = "100000",
+    active: bool = True,
+    agent_max_amount: str = "50000",
+    intent_max_amount: str = "20000",
+    intent_ttl: timedelta = timedelta(hours=1),
+    intent_agent_id: str = "benchmark-agent",
+    intent_action: str = "book_hotel",
+) -> tuple[PolicyEngine, datetime]:
     now = datetime.now(timezone.utc)
     engine = PolicyEngine()
     engine.register_agent(
@@ -29,23 +36,40 @@ def _configured_engine(*, daily_budget: str = "100000") -> tuple[
             agent_id="benchmark-agent",
             name="Benchmark Agent",
             allowed_actions=frozenset({"book_hotel"}),
-            max_action_amount=Decimal("50000"),
+            max_action_amount=Decimal(agent_max_amount),
             daily_budget=Decimal(daily_budget),
+            active=active,
         )
     )
     engine.register_intent(
         IntentPassport(
             intent_id="benchmark-intent",
             customer_id="benchmark-customer",
-            agent_id="benchmark-agent",
-            action="book_hotel",
-            max_amount=Decimal("20000"),
+            agent_id=intent_agent_id,
+            action=intent_action,
+            max_amount=Decimal(intent_max_amount),
             currency="INR",
-            expires_at=now + timedelta(hours=1),
+            expires_at=now + intent_ttl,
             required_attributes={"refundable": True},
         )
     )
     return engine, now
+
+
+def create_api_probe_engine() -> PolicyEngine:
+    """Create isolated state for browser-to-FastAPI latency probes."""
+
+    engine, _ = _configured_engine(
+        daily_budget="1000000",
+        intent_ttl=timedelta(days=1),
+    )
+    return engine
+
+
+def api_probe_request(request_id: str) -> ActionRequest:
+    """Build a valid authorization request for the isolated API probe."""
+
+    return _request(request_id, amount="1")
 
 
 def _request(
@@ -53,42 +77,477 @@ def _request(
     *,
     amount: str = "1000",
     action: str = "book_hotel",
+    agent_id: str = "benchmark-agent",
+    intent_id: str = "benchmark-intent",
+    currency: str = "INR",
     risk_score: int = 20,
-    refundable: bool = True,
+    attributes: dict[str, Any] | None = None,
 ) -> ActionRequest:
     return ActionRequest(
         request_id=request_id,
-        agent_id="benchmark-agent",
+        agent_id=agent_id,
         action=action,
         amount=Decimal(amount),
-        currency="INR",
-        intent_id="benchmark-intent",
+        currency=currency,
+        intent_id=intent_id,
         risk_score=risk_score,
-        attributes={"refundable": refundable},
+        attributes=(
+            {"refundable": True}
+            if attributes is None
+            else attributes
+        ),
     )
+
+
+def _decision_case(
+    *,
+    name: str,
+    category: str,
+    engine: PolicyEngine,
+    now: datetime,
+    request: ActionRequest,
+    expected_decision: Decision,
+    expected_finding: str,
+) -> dict[str, Any]:
+    result = engine.evaluate(request, now=now)
+    finding_codes = [finding.code for finding in result.findings]
+    passed = (
+        result.decision is expected_decision
+        and expected_finding in finding_codes
+    )
+    return {
+        "name": name,
+        "category": category,
+        "passed": passed,
+        "expected": {
+            "decision": expected_decision.value,
+            "finding": expected_finding,
+        },
+        "observed": {
+            "decision": result.decision.value,
+            "findings": finding_codes,
+        },
+    }
+
+
+def _control_case(
+    *,
+    name: str,
+    category: str,
+    passed: bool,
+    expected: str,
+    observed: str,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "category": category,
+        "passed": passed,
+        "expected": expected,
+        "observed": observed,
+    }
+
+
+def _run_acceptance_suite() -> tuple[list[dict[str, Any]], list[PolicyEngine]]:
+    """Exercise deterministic policy boundaries and adversarial controls."""
+
+    results: list[dict[str, Any]] = []
+    engines: list[PolicyEngine] = []
+
+    def configured(**kwargs: Any) -> tuple[PolicyEngine, datetime]:
+        engine, now = _configured_engine(**kwargs)
+        engines.append(engine)
+        return engine, now
+
+    def decision(
+        name: str,
+        category: str,
+        engine: PolicyEngine,
+        now: datetime,
+        request: ActionRequest,
+        expected_decision: Decision,
+        expected_finding: str,
+    ) -> None:
+        results.append(
+            _decision_case(
+                name=name,
+                category=category,
+                engine=engine,
+                now=now,
+                request=request,
+                expected_decision=expected_decision,
+                expected_finding=expected_finding,
+            )
+        )
+
+    base, base_now = configured()
+    decision(
+        "Compliant request is allowed",
+        "permitted boundaries",
+        base,
+        base_now,
+        _request("accept-compliant"),
+        Decision.ALLOW,
+        "POLICY_SATISFIED",
+    )
+    decision(
+        "Exact customer amount boundary is allowed",
+        "permitted boundaries",
+        base,
+        base_now,
+        _request("accept-intent-boundary", amount="20000"),
+        Decision.ALLOW,
+        "POLICY_SATISFIED",
+    )
+    decision(
+        "Additional non-conflicting context is allowed",
+        "permitted boundaries",
+        base,
+        base_now,
+        _request(
+            "accept-extra-context",
+            attributes={"refundable": True, "channel": "mobile"},
+        ),
+        Decision.ALLOW,
+        "POLICY_SATISFIED",
+    )
+    decision(
+        "Risk immediately below threshold is allowed",
+        "risk routing",
+        base,
+        base_now,
+        _request("accept-risk-below", risk_score=69),
+        Decision.ALLOW,
+        "POLICY_SATISFIED",
+    )
+    decision(
+        "Risk threshold routes to review",
+        "risk routing",
+        base,
+        base_now,
+        _request("review-risk-threshold", risk_score=70),
+        Decision.REVIEW,
+        "HUMAN_APPROVAL_REQUIRED",
+    )
+    decision(
+        "Maximum risk routes to review",
+        "risk routing",
+        base,
+        base_now,
+        _request("review-risk-maximum", risk_score=100),
+        Decision.REVIEW,
+        "HUMAN_APPROVAL_REQUIRED",
+    )
+    decision(
+        "Customer intent amount breach is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-intent-amount", amount="20001"),
+        Decision.DENY,
+        "INTENT_AMOUNT_EXCEEDED",
+    )
+    decision(
+        "Agent action limit breach is denied",
+        "permission envelope",
+        base,
+        base_now,
+        _request("deny-agent-limit", amount="50001"),
+        Decision.DENY,
+        "AGENT_ACTION_LIMIT",
+    )
+    decision(
+        "Unpermitted action is denied",
+        "permission envelope",
+        base,
+        base_now,
+        _request("deny-action", action="pay_merchant"),
+        Decision.DENY,
+        "ACTION_NOT_PERMITTED",
+    )
+    decision(
+        "Wrong currency is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-currency", currency="USD"),
+        Decision.DENY,
+        "INTENT_CURRENCY_MISMATCH",
+    )
+    decision(
+        "Conflicting required attribute is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-attribute", attributes={"refundable": False}),
+        Decision.DENY,
+        "INTENT_ATTRIBUTE_MISMATCH",
+    )
+    decision(
+        "Missing required attribute is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-missing-attribute", attributes={}),
+        Decision.DENY,
+        "INTENT_ATTRIBUTE_MISMATCH",
+    )
+    decision(
+        "Unknown intent is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-unknown-intent", intent_id="missing-intent"),
+        Decision.DENY,
+        "INTENT_UNKNOWN",
+    )
+    decision(
+        "Unknown agent is denied",
+        "identity and lifecycle",
+        base,
+        base_now,
+        _request("deny-unknown-agent", agent_id="missing-agent"),
+        Decision.DENY,
+        "AGENT_UNKNOWN",
+    )
+
+    action_mismatch, action_mismatch_now = configured(
+        intent_action="book_flight"
+    )
+    decision(
+        "Intent action mismatch is denied",
+        "authenticated intent",
+        action_mismatch,
+        action_mismatch_now,
+        _request("deny-intent-action"),
+        Decision.DENY,
+        "INTENT_ACTION_MISMATCH",
+    )
+
+    agent_mismatch, agent_mismatch_now = configured(
+        intent_agent_id="other-agent"
+    )
+    decision(
+        "Intent assigned to another agent is denied",
+        "authenticated intent",
+        agent_mismatch,
+        agent_mismatch_now,
+        _request("deny-intent-agent"),
+        Decision.DENY,
+        "INTENT_AGENT_MISMATCH",
+    )
+
+    expired, expired_now = configured(intent_ttl=timedelta(seconds=-1))
+    decision(
+        "Expired intent is denied",
+        "authenticated intent",
+        expired,
+        expired_now,
+        _request("deny-expired-intent"),
+        Decision.DENY,
+        "INTENT_EXPIRED",
+    )
+
+    inactive, inactive_now = configured(active=False)
+    decision(
+        "Inactive agent is denied",
+        "identity and lifecycle",
+        inactive,
+        inactive_now,
+        _request("deny-inactive-agent"),
+        Decision.DENY,
+        "AGENT_INACTIVE",
+    )
+
+    revoked, revoked_now = configured()
+    revoked.revoke_agent("benchmark-agent")
+    decision(
+        "Revoked agent is denied",
+        "identity and lifecycle",
+        revoked,
+        revoked_now,
+        _request("deny-revoked-agent"),
+        Decision.DENY,
+        "AGENT_REVOKED",
+    )
+
+    stopped, stopped_now = configured()
+    stopped.stop_fleet(reason="Acceptance-suite fleet stop")
+    decision(
+        "Fleet emergency stop fails closed",
+        "identity and lifecycle",
+        stopped,
+        stopped_now,
+        _request("deny-fleet-stopped"),
+        Decision.DENY,
+        "FLEET_STOPPED",
+    )
+
+    exhausted, exhausted_now = configured(daily_budget="999")
+    decision(
+        "Daily budget breach is denied",
+        "budget enforcement",
+        exhausted,
+        exhausted_now,
+        _request("deny-daily-budget", amount="1000"),
+        Decision.DENY,
+        "DAILY_BUDGET_EXCEEDED",
+    )
+
+    exact_budget, exact_budget_now = configured(daily_budget="1000")
+    decision(
+        "Exact remaining budget is allowed",
+        "budget enforcement",
+        exact_budget,
+        exact_budget_now,
+        _request("accept-daily-boundary", amount="1000"),
+        Decision.ALLOW,
+        "POLICY_SATISFIED",
+    )
+
+    replay, replay_now = configured()
+    replay_request = _request("control-idempotent-replay")
+    first = replay.authorize_action(replay_request, now=replay_now)
+    second = replay.authorize_action(replay_request, now=replay_now)
+    same_lease = (
+        first.lease is not None
+        and second.lease is not None
+        and first.lease.lease_id == second.lease.lease_id
+        and first.reservation is not None
+        and second.reservation is not None
+        and first.reservation.reservation_id == second.reservation.reservation_id
+    )
+    results.append(
+        _control_case(
+            name="Identical request replay is idempotent",
+            category="replay protection",
+            passed=same_lease,
+            expected="same lease and reservation",
+            observed="same lease and reservation" if same_lease else "new artifact issued",
+        )
+    )
+
+    conflict_rejected = False
+    conflict_observed = "request accepted"
+    try:
+        replay.authorize_action(
+            _request("control-idempotent-replay", amount="1001"),
+            now=replay_now,
+        )
+    except ValueError as exc:
+        conflict_rejected = "different action data" in str(exc)
+        conflict_observed = str(exc)
+    results.append(
+        _control_case(
+            name="Conflicting request-ID replay is rejected",
+            category="replay protection",
+            passed=conflict_rejected,
+            expected="rejected as conflicting replay",
+            observed=conflict_observed,
+        )
+    )
+
+    stale, stale_now = configured()
+    stale_authorization = stale.authorize_action(
+        _request("control-stale-lease"),
+        now=stale_now,
+    )
+    stale.stop_fleet(reason="Invalidate the outstanding lease")
+    stale_rejected = False
+    stale_observed = "lease accepted"
+    try:
+        stale.commit_reservation(
+            stale_authorization.reservation.reservation_id,  # type: ignore[union-attr]
+            lease_id=stale_authorization.lease.lease_id,  # type: ignore[union-attr]
+            now=stale_now + timedelta(seconds=1),
+        )
+    except ValueError as exc:
+        stale_rejected = "fleet stop" in str(exc)
+        stale_observed = str(exc)
+    results.append(
+        _control_case(
+            name="Pre-stop execution lease is rejected",
+            category="lease safety",
+            passed=stale_rejected,
+            expected="rejected after fleet epoch change",
+            observed=stale_observed,
+        )
+    )
+
+    expired_lease, lease_now = configured()
+    expiring_authorization = expired_lease.authorize_action(
+        _request("control-expired-lease"),
+        now=lease_now,
+        lease_ttl=timedelta(seconds=1),
+    )
+    expiry_rejected = False
+    expiry_observed = "lease accepted"
+    try:
+        expired_lease.commit_reservation(
+            expiring_authorization.reservation.reservation_id,  # type: ignore[union-attr]
+            lease_id=expiring_authorization.lease.lease_id,  # type: ignore[union-attr]
+            now=lease_now + timedelta(seconds=2),
+        )
+    except ValueError as exc:
+        expiry_rejected = "expired" in str(exc)
+        expiry_observed = str(exc)
+    results.append(
+        _control_case(
+            name="Expired execution lease is rejected",
+            category="lease safety",
+            passed=expiry_rejected,
+            expected="rejected after lease expiry",
+            observed=expiry_observed,
+        )
+    )
+
+    revoked_lease, revoked_lease_now = configured()
+    revoked_authorization = revoked_lease.authorize_action(
+        _request("control-revoked-lease"),
+        now=revoked_lease_now,
+    )
+    revoked_lease.revoke_agent("benchmark-agent")
+    revocation_rejected = False
+    revocation_observed = "lease accepted"
+    try:
+        revoked_lease.commit_reservation(
+            revoked_authorization.reservation.reservation_id,  # type: ignore[union-attr]
+            lease_id=revoked_authorization.lease.lease_id,  # type: ignore[union-attr]
+            now=revoked_lease_now + timedelta(seconds=1),
+        )
+    except ValueError as exc:
+        revocation_rejected = "revoked agent" in str(exc)
+        revocation_observed = str(exc)
+    results.append(
+        _control_case(
+            name="Revocation invalidates an outstanding lease",
+            category="lease safety",
+            passed=revocation_rejected,
+            expected="rejected after agent revocation",
+            observed=revocation_observed,
+        )
+    )
+
+    return results, engines
 
 
 def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
-    """Run deterministic labeled scenarios plus an atomic overspend race."""
+    """Run acceptance controls plus engine, race, and audit measurements."""
+
+    acceptance_results, acceptance_engines = _run_acceptance_suite()
+    passed = sum(result["passed"] for result in acceptance_results)
+    failed_results = [
+        result for result in acceptance_results if not result["passed"]
+    ]
+    categories = sorted(
+        {result["category"] for result in acceptance_results}
+    )
 
     engine, now = _configured_engine()
-    labeled = (
-        (_request("label-allow"), Decision.ALLOW),
-        (_request("label-amount", amount="25000"), Decision.DENY),
-        (_request("label-action", action="pay_merchant"), Decision.DENY),
-        (_request("label-intent", refundable=False), Decision.DENY),
-        (_request("label-review", risk_score=85), Decision.REVIEW),
-    )
-    correct = sum(
-        engine.evaluate(request, now=now).decision is expected
-        for request, expected in labeled
-    )
-
-    latency_ms: list[float] = []
+    engine_latency_ms: list[float] = []
     for index in range(iterations):
         started = perf_counter_ns()
         engine.evaluate(_request(f"latency-{index}"), now=now)
-        latency_ms.append((perf_counter_ns() - started) / 1_000_000)
+        engine_latency_ms.append((perf_counter_ns() - started) / 1_000_000)
 
     race_engine, race_now = _configured_engine(daily_budget="10000")
     race_requests = [
@@ -118,12 +577,20 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
 
     return {
         "iterations": iterations,
-        "labeled_scenarios": len(labeled),
-        "accuracy_percent": round(correct / len(labeled) * 100, 2),
-        "latency_ms": {
-            "p50": round(median(latency_ms), 4),
-            "p95": round(_percentile(latency_ms, 0.95), 4),
-            "p99": round(_percentile(latency_ms, 0.99), 4),
+        "acceptance": {
+            "total": len(acceptance_results),
+            "passed": passed,
+            "failed": len(failed_results),
+            "category_count": len(categories),
+            "categories": categories,
+            "failures": failed_results,
+            "results": acceptance_results,
+        },
+        "engine_latency_ms": {
+            "scope": "in_process_policy_engine",
+            "p50": round(median(engine_latency_ms), 4),
+            "p95": round(_percentile(engine_latency_ms, 0.95), 4),
+            "p99": round(_percentile(engine_latency_ms, 0.99), 4),
         },
         "concurrency": {
             "requests": len(race_requests),
@@ -133,7 +600,12 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
             "overspend_violations": int(reserved_total > Decimal("10000")),
         },
         "audit_chain_verified": (
-            engine.audit_ledger.verify() and race_engine.audit_ledger.verify()
+            engine.audit_ledger.verify()
+            and race_engine.audit_ledger.verify()
+            and all(
+                acceptance_engine.audit_ledger.verify()
+                for acceptance_engine in acceptance_engines
+            )
         ),
     }
 

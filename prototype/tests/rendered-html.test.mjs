@@ -34,6 +34,10 @@ test("server-renders the IntentGuard operator console", async () => {
   assert.match(html, /Stale lease after emergency stop/);
   assert.match(html, /Permission and budget configuration/);
   assert.match(html, /Measured evaluation evidence/);
+  assert.match(html, /Measured API round-trip p95/);
+  assert.match(html, /Running deterministic evidence suite/);
+  assert.doesNotMatch(html, /Measured gateway latency/);
+  assert.doesNotMatch(html, /LABELED ACCURACY/);
   assert.match(html, /Production roadmap/i);
   assert.match(html, /Emergency stop/);
   assert.match(html, /Live decisions/);

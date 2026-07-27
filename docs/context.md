@@ -24,7 +24,7 @@ first-round submission.
 - Vinext operator dashboard under `prototype/` on `main`
 - Live versioned permission and budget editor
 - Protected-connector stale-lease rejection demonstration
-- Reproducible accuracy, latency, concurrency, and audit benchmark
+- Reproducible acceptance, engine/API latency, concurrency, and audit benchmark
 - Downloadable audit evidence
 
 ## Architecture decisions

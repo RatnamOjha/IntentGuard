@@ -49,7 +49,8 @@ The frontend should use stable finding `code` values for filters and finding
 | GET | `/v1/audit/status` | Verify the SHA-256 chain and return its head |
 | POST | `/v1/demo/bootstrap` | Idempotently initialize the dashboard sandbox |
 | POST | `/v1/demo/reset` | Reset the deterministic dashboard sandbox |
-| GET | `/v1/demo/benchmark` | Run measured accuracy, latency, concurrency, and audit checks |
+| GET | `/v1/demo/benchmark` | Run 27 acceptance controls plus in-process engine latency, concurrency, and audit checks |
+| POST | `/v1/demo/benchmark/authorize-probe` | Exercise an isolated authorization path for browser-to-FastAPI round-trip measurement |
 
 ## Authorization example
 
