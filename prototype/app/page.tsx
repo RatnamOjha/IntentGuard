@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type ActionPayload,
@@ -9,6 +9,7 @@ import {
   type ApiAuditEvent,
   type ApiAuditStatus,
   type ApiAuthorization,
+  type ApiBenchmark,
   authorizeAction,
   bootstrapDemo,
   commitAuthorization,
@@ -16,15 +17,17 @@ import {
   getApprovals,
   getAuditEvents,
   getAuditStatus,
+  getBenchmark,
   getFleetStatus,
   resetDemo,
   resolveApproval,
   setAgentRevocation,
   setFleetStop,
+  updateAgentPolicy,
 } from "@/lib/intentguard-api";
 
 type Decision = "Allowed" | "Review" | "Blocked";
-type AgentStatus = "Live" | "Revoked";
+type AgentStatus = "Live" | "Revoked" | "Inactive";
 
 type Agent = {
   id: string;
@@ -97,6 +100,18 @@ const scenarios = {
     riskScore: 85,
     attributes: {},
   },
+  stale: {
+    title: "Stale lease after emergency stop",
+    agent: "Atlas",
+    agentId: "agt_travel_01",
+    action: "Book hotel, then stop fleet",
+    amount: "₹1,000",
+    amountValue: "1000",
+    actionCode: "book_hotel",
+    intentId: "intent_travel_booking",
+    riskScore: 18,
+    attributes: { city: "BOM", refundable: true },
+  },
 };
 
 type ScenarioKey = keyof typeof scenarios;
@@ -110,6 +125,35 @@ type Result = {
   remainingBudget: number;
   leaseId: string | null;
 };
+
+type PolicyDraft = {
+  allowedActions: string[];
+  maxActionAmount: string;
+  dailyBudget: string;
+  active: boolean;
+};
+
+type TraceState = "pass" | "fail" | "review" | "pending";
+
+const actionCatalog = [
+  "book_flight",
+  "book_hotel",
+  "issue_service_credit",
+  "replace_card",
+  "reverse_annual_fee",
+  "activate_benefit",
+  "submit_benefit_claim",
+  "pay_external_merchant",
+];
+
+const traceStages = [
+  "Identity",
+  "Intent",
+  "Permission",
+  "Budget",
+  "Risk",
+  "Connector",
+] as const;
 
 const agentPresentation: Record<string, { role: string; initials: string }> = {
   agt_travel_01: { role: "Travel concierge", initials: "AT" },
@@ -144,10 +188,19 @@ function toAgent(agent: ApiAgent): Agent {
     name: agent.name,
     role: presentation.role,
     initials: presentation.initials,
-    status: agent.revoked || !agent.active ? "Revoked" : "Live",
+    status: agent.revoked ? "Revoked" : agent.active ? "Live" : "Inactive",
     spent: Number(agent.spent_today) + Number(agent.reserved_today),
     budget: Number(agent.daily_budget),
     permissions: agent.allowed_actions.length,
+  };
+}
+
+function policyDraftFromAgent(agent: ApiAgent): PolicyDraft {
+  return {
+    allowedActions: agent.allowed_actions,
+    maxActionAmount: agent.max_action_amount,
+    dailyBudget: agent.daily_budget,
+    active: agent.active,
   };
 }
 
@@ -155,6 +208,28 @@ function decisionLabel(value: unknown): Decision {
   if (value === "allow") return "Allowed";
   if (value === "review") return "Review";
   return "Blocked";
+}
+
+function traceState(step: (typeof traceStages)[number], result: Result | null): TraceState {
+  if (!result) return "pending";
+  const failures: Partial<Record<(typeof traceStages)[number], string[]>> = {
+    Identity: ["FLEET_STOPPED", "AGENT_UNKNOWN", "AGENT_INACTIVE", "AGENT_REVOKED"],
+    Intent: [
+      "INTENT_UNKNOWN",
+      "INTENT_AGENT_MISMATCH",
+      "INTENT_ACTION_MISMATCH",
+      "INTENT_EXPIRED",
+      "INTENT_CURRENCY_MISMATCH",
+      "INTENT_AMOUNT_EXCEEDED",
+      "INTENT_ATTRIBUTE_MISMATCH",
+    ],
+    Permission: ["ACTION_NOT_PERMITTED", "AGENT_ACTION_LIMIT"],
+    Budget: ["DAILY_BUDGET_EXCEEDED"],
+    Connector: ["STALE_LEASE_REJECTED"],
+  };
+  if (failures[step]?.some((code) => result.findings.includes(code))) return "fail";
+  if (step === "Risk" && result.decision === "Review") return "review";
+  return "pass";
 }
 
 function toEvent(event: ApiAuditEvent, agentNames: Record<string, string>): Event | null {
@@ -237,10 +312,34 @@ function toEvent(event: ApiAuditEvent, agentNames: Record<string, string>): Even
       reason: String(payload.reason ?? "Operator fleet control"),
     };
   }
+  if (
+    event.event_type === "connector.execution.rejected" ||
+    event.event_type === "connector.execution.succeeded"
+  ) {
+    const succeeded = event.event_type === "connector.execution.succeeded";
+    return {
+      ...base,
+      action: succeeded ? "Protected connector executed" : "Connector rejected lease",
+      decision: succeeded ? "Allowed" : "Blocked",
+      reason: String(
+        payload.reason ??
+          (succeeded ? "Lease validated and budget committed" : "Lease rejected"),
+      ),
+    };
+  }
+  if (event.event_type === "policy.updated") {
+    return {
+      ...base,
+      action: "Policy version published",
+      decision: "Allowed",
+      reason: String(payload.policy_version ?? "Policy updated"),
+    };
+  }
   return null;
 }
 
 export default function Home() {
+  const [apiAgents, setApiAgents] = useState<ApiAgent[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [approvals, setApprovals] = useState<ApiApproval[]>([]);
@@ -259,10 +358,24 @@ export default function Home() {
     "connecting" | "live" | "offline"
   >("connecting");
   const [isWorking, setIsWorking] = useState(false);
+  const [benchmark, setBenchmark] = useState<ApiBenchmark | null>(null);
+  const [selectedPolicyAgentId, setSelectedPolicyAgentId] =
+    useState("agt_travel_01");
+  const selectedPolicyAgentRef = useRef("agt_travel_01");
+  const [policyDraft, setPolicyDraft] = useState<PolicyDraft>({
+    allowedActions: [],
+    maxActionAmount: "",
+    dailyBudget: "",
+    active: true,
+  });
+  const [policyVersion, setPolicyVersion] = useState("2026.07");
 
   const liveCount = agents.filter((agent) => agent.status === "Live").length;
   const pendingApprovals = approvals.filter(
     (approval) => approval.status === "pending",
+  );
+  const selectedPolicyAgent = apiAgents.find(
+    (agent) => agent.agent_id === selectedPolicyAgentId,
   );
   const summary = useMemo(
     () => ({
@@ -293,7 +406,16 @@ export default function Home() {
     const names = Object.fromEntries(
       mappedAgents.map((agent) => [agent.id, agent.name]),
     );
+    setApiAgents(apiAgents);
     setAgents(mappedAgents);
+    const selectedForPolicy =
+      apiAgents.find(
+        (agent) => agent.agent_id === selectedPolicyAgentRef.current,
+      ) ??
+      apiAgents[0];
+    if (selectedForPolicy) {
+      setPolicyDraft(policyDraftFromAgent(selectedForPolicy));
+    }
     setFleetStopped(fleet.stopped);
     setApprovals(apiApprovals);
     setAuditStatus(status);
@@ -310,6 +432,8 @@ export default function Home() {
     void (async () => {
       try {
         await bootstrapDemo();
+        const measuredBenchmark = await getBenchmark();
+        setBenchmark(measuredBenchmark);
         await refreshData();
       } catch (error) {
         setConnectionState("offline");
@@ -336,8 +460,49 @@ export default function Home() {
     };
     setIsWorking(true);
     const startedAt = performance.now();
+    let restoreAfterStaleDemo = false;
     try {
+      if (scenarioKey === "stale" && fleetStopped) {
+        await setFleetStop(false);
+      }
       const authorization = await authorizeAction(payload);
+      if (
+        scenarioKey === "stale" &&
+        authorization.decision.decision === "allow"
+      ) {
+        await setFleetStop(true);
+        restoreAfterStaleDemo = true;
+        let rejectionReason: string | null = null;
+        try {
+          await commitAuthorization(authorization);
+        } catch (error) {
+          rejectionReason =
+            error instanceof Error
+              ? error.message
+              : "The connector rejected the invalidated lease.";
+        }
+        if (!rejectionReason) {
+          throw new Error("The connector unexpectedly accepted a stale lease.");
+        }
+          setLastResult({
+            requestId: authorization.decision.request_id,
+            decision: "Blocked",
+            reason: rejectionReason,
+            latency: `${(performance.now() - startedAt).toFixed(2)} ms`,
+            findings: ["STALE_LEASE_REJECTED", "FLEET_EPOCH_CHANGED"],
+            remainingBudget: Number(
+              authorization.decision.remaining_daily_budget,
+            ),
+            leaseId: authorization.lease?.lease_id ?? null,
+          });
+          await setFleetStop(false);
+          restoreAfterStaleDemo = false;
+          await refreshData();
+          setNotice(
+            "Attack blocked: the protected connector rejected the pre-stop lease.",
+          );
+          return;
+      }
       if (authorization.decision.decision === "allow") {
         await commitAuthorization(authorization);
       }
@@ -369,15 +534,36 @@ export default function Home() {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Evaluation failed.");
     } finally {
+      if (restoreAfterStaleDemo) {
+        try {
+          await setFleetStop(false);
+          await refreshData();
+        } catch {
+          setNotice("The stale lease was blocked, but the demo fleet needs restoration.");
+        }
+      }
       setIsWorking(false);
     }
   }
 
   async function toggleAgent(agentId: string) {
     const target = agents.find((agent) => agent.id === agentId);
+    const runtimeAgent = apiAgents.find((agent) => agent.agent_id === agentId);
     if (!target) return;
     setIsWorking(true);
     try {
+      if (target.status === "Inactive" && runtimeAgent) {
+        const response = await updateAgentPolicy(agentId, {
+          allowed_actions: runtimeAgent.allowed_actions,
+          max_action_amount: runtimeAgent.max_action_amount,
+          daily_budget: runtimeAgent.daily_budget,
+          active: true,
+        });
+        setPolicyVersion(response.policy_version);
+        await refreshData();
+        setNotice(`${target.name} activated through a new policy version.`);
+        return;
+      }
       const revoke = target.status === "Live";
       await setAgentRevocation(agentId, revoke);
       await refreshData();
@@ -464,6 +650,104 @@ export default function Home() {
     }
   }
 
+  async function publishPolicy() {
+    setIsWorking(true);
+    try {
+      const response = await updateAgentPolicy(selectedPolicyAgentId, {
+        allowed_actions: policyDraft.allowedActions,
+        max_action_amount: policyDraft.maxActionAmount,
+        daily_budget: policyDraft.dailyBudget,
+        active: policyDraft.active,
+      });
+      setPolicyVersion(response.policy_version);
+      await refreshData();
+      setNotice(
+        `${response.policy_version} published. Re-run a scenario to observe the new decision.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Policy publishing failed.");
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  function togglePolicyAction(action: string) {
+    setPolicyDraft((current) => ({
+      ...current,
+      allowedActions: current.allowedActions.includes(action)
+        ? current.allowedActions.filter((item) => item !== action)
+        : [...current.allowedActions, action],
+    }));
+  }
+
+  async function rerunBenchmark() {
+    setIsWorking(true);
+    try {
+      const evidence = await getBenchmark();
+      setBenchmark(evidence);
+      setNotice(
+        `${evidence.iterations.toLocaleString("en-IN")} evaluations completed with ${evidence.concurrency.overspend_violations} overspend violations.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Benchmark failed.");
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function exportEvidence() {
+    setIsWorking(true);
+    try {
+      const [auditEvents, status, evidence] = await Promise.all([
+        getAuditEvents(),
+        getAuditStatus(),
+        getBenchmark(),
+      ]);
+      const blob = new Blob(
+        [
+          JSON.stringify(
+            {
+              exported_at: new Date().toISOString(),
+              audit_status: status,
+              benchmark: evidence,
+              events: auditEvents,
+            },
+            null,
+            2,
+          ),
+        ],
+        { type: "application/json" },
+      );
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `intentguard-evidence-${Date.now()}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setNotice("Verified audit and benchmark evidence downloaded.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Evidence export failed.");
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  function navigateTo(item: string) {
+    const targets: Record<string, string> = {
+      Overview: "overview",
+      "Agent fleet": "agent-fleet",
+      Policies: "configuration",
+      Budgets: "configuration",
+      Approvals: "approvals",
+      "Audit trail": "audit-trail",
+      Integrations: "integrations",
+    };
+    setActiveNav(item);
+    document
+      .getElementById(targets[item] ?? "overview")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -484,14 +768,7 @@ export default function Home() {
               <button
                 className={activeNav === item ? "nav-item active" : "nav-item"}
                 key={item}
-                onClick={() => {
-                  setActiveNav(item);
-                  if (item === "Approvals") {
-                    document
-                      .getElementById("approvals")
-                      ?.scrollIntoView({ behavior: "smooth" });
-                  }
-                }}
+                onClick={() => navigateTo(item)}
                 type="button"
               >
                 <span className="nav-icon" aria-hidden="true">
@@ -514,14 +791,7 @@ export default function Home() {
             <button
               className={activeNav === item ? "nav-item active" : "nav-item"}
               key={item}
-              onClick={() => {
-                setActiveNav(item);
-                if (item === "Audit trail") {
-                  document
-                    .getElementById("audit-trail")
-                    ?.scrollIntoView({ behavior: "smooth" });
-                }
-              }}
+              onClick={() => navigateTo(item)}
               type="button"
             >
               <span className="nav-icon" aria-hidden="true">
@@ -558,7 +828,7 @@ export default function Home() {
         </div>
       </aside>
 
-      <main className="main-content">
+      <main className="main-content" id="overview">
         <header className="topbar">
           <div>
             <p className="eyebrow">GOVERNANCE OVERVIEW</p>
@@ -639,12 +909,16 @@ export default function Home() {
           <div className="decision-latency">
             <div className="latency-ring">
               <span>p95</span>
-              <strong>{p95Latency}</strong>
+              <strong>{benchmark?.latency_ms.p95 ?? p95Latency}</strong>
               <small>milliseconds</small>
             </div>
             <div className="latency-copy">
               <strong>Measured gateway latency</strong>
-              <small>Derived from live API decisions</small>
+              <small>
+                {benchmark
+                  ? `${benchmark.iterations.toLocaleString("en-IN")} deterministic evaluations`
+                  : "Derived from live API decisions"}
+              </small>
             </div>
           </div>
         </section>
@@ -663,7 +937,11 @@ export default function Home() {
             <div>
               <p>Allowed today</p>
               <strong>{summary.allowed.toLocaleString("en-IN")}</strong>
-              <span className="metric-note positive">Backend decisions executed</span>
+              <span className="metric-note positive">
+                {benchmark
+                  ? `${benchmark.accuracy_percent}% labeled accuracy`
+                  : "Backend decisions executed"}
+              </span>
             </div>
           </article>
           <article className="metric-card">
@@ -751,13 +1029,23 @@ export default function Home() {
             </div>
 
             <div className="policy-chain" aria-label="Policy evaluation sequence">
-              {["Identity", "Permission", "Budget", "Risk"].map((step, index) => (
-                <div className="chain-step" key={step}>
-                  <span>{index + 1}</span>
+              {traceStages.map((step, index) => {
+                const state = traceState(step, lastResult);
+                return (
+                <div className={`chain-step ${state}`} key={step}>
+                  <span>
+                    {state === "pass"
+                      ? "✓"
+                      : state === "fail"
+                        ? "×"
+                        : state === "review"
+                          ? "!"
+                          : index + 1}
+                  </span>
                   <small>{step}</small>
-                  {index < 3 && <i aria-hidden="true">→</i>}
+                  {index < traceStages.length - 1 && <i aria-hidden="true">→</i>}
                 </div>
-              ))}
+              )})}
             </div>
 
             <button
@@ -803,15 +1091,15 @@ export default function Home() {
             )}
           </article>
 
-          <article className="panel fleet-panel">
+          <article className="panel fleet-panel" id="agent-fleet">
             <div className="panel-header">
               <div>
-                <span className="panel-kicker">SIGNED EXECUTION LEASES</span>
+                <span className="panel-kicker">BOUNDED EXECUTION LEASES</span>
                 <h3>Agent fleet</h3>
               </div>
               <button
                 className="text-button"
-                onClick={() => setNotice("Agent fleet workspace selected.")}
+                onClick={() => navigateTo("Agent fleet")}
                 type="button"
               >
                 View all →
@@ -857,7 +1145,11 @@ export default function Home() {
                           onClick={() => toggleAgent(agent.id)}
                           type="button"
                         >
-                          {agent.status === "Live" ? "Revoke" : "Restore"}
+                          {agent.status === "Live"
+                            ? "Revoke"
+                            : agent.status === "Inactive"
+                              ? "Activate"
+                              : "Restore"}
                         </button>
                       </div>
                     </div>
@@ -866,6 +1158,153 @@ export default function Home() {
               })}
             </div>
           </article>
+        </section>
+
+        <section className="panel configuration-panel" id="configuration">
+          <div className="panel-header">
+            <div>
+              <span className="panel-kicker">VERSIONED RUNTIME POLICY</span>
+              <h3>Permission and budget configuration</h3>
+            </div>
+            <span className="policy-version">{policyVersion}</span>
+          </div>
+          <div className="configuration-grid">
+            <div className="configuration-agent">
+              <label className="field-label" htmlFor="policy-agent">
+                Agent policy
+              </label>
+              <div className="select-wrap">
+                <select
+                  id="policy-agent"
+                  onChange={(event) => {
+                    const agentId = event.target.value;
+                    setSelectedPolicyAgentId(agentId);
+                    selectedPolicyAgentRef.current = agentId;
+                    const selected = apiAgents.find(
+                      (agent) => agent.agent_id === agentId,
+                    );
+                    if (selected) {
+                      setPolicyDraft(policyDraftFromAgent(selected));
+                    }
+                  }}
+                  value={selectedPolicyAgentId}
+                >
+                  {apiAgents.map((agent) => (
+                    <option key={agent.agent_id} value={agent.agent_id}>
+                      {agent.name} · {agent.agent_id}
+                    </option>
+                  ))}
+                </select>
+                <span aria-hidden="true">⌄</span>
+              </div>
+              <div className="configuration-summary">
+                <span>
+                  <small>COMMITTED + HELD</small>
+                  <strong>
+                    {formatCurrency(
+                      Number(selectedPolicyAgent?.spent_today ?? 0) +
+                        Number(selectedPolicyAgent?.reserved_today ?? 0),
+                    )}
+                  </strong>
+                </span>
+                <span>
+                  <small>REMAINING</small>
+                  <strong>
+                    {formatCurrency(selectedPolicyAgent?.remaining_budget)}
+                  </strong>
+                </span>
+              </div>
+              <label className="switch-row">
+                <span>
+                  <strong>Agent active</strong>
+                  <small>Inactive agents fail closed at identity verification.</small>
+                </span>
+                <input
+                  checked={policyDraft.active}
+                  onChange={(event) =>
+                    setPolicyDraft((current) => ({
+                      ...current,
+                      active: event.target.checked,
+                    }))
+                  }
+                  type="checkbox"
+                />
+              </label>
+            </div>
+
+            <fieldset className="permission-editor">
+              <legend>Permitted financial actions</legend>
+              <p>Every unchecked capability is denied before connector execution.</p>
+              <div className="permission-options">
+                {actionCatalog.map((action) => (
+                  <label
+                    className={
+                      policyDraft.allowedActions.includes(action)
+                        ? "permission-option selected"
+                        : "permission-option"
+                    }
+                    key={action}
+                  >
+                    <input
+                      checked={policyDraft.allowedActions.includes(action)}
+                      onChange={() => togglePolicyAction(action)}
+                      type="checkbox"
+                    />
+                    <span>{readableAction(action)}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <div className="budget-editor">
+              <label className="field-label" htmlFor="action-limit">
+                Maximum per action (INR)
+              </label>
+              <input
+                id="action-limit"
+                min="0"
+                onChange={(event) =>
+                  setPolicyDraft((current) => ({
+                    ...current,
+                    maxActionAmount: event.target.value,
+                  }))
+                }
+                type="number"
+                value={policyDraft.maxActionAmount}
+              />
+              <label className="field-label" htmlFor="daily-budget">
+                Daily budget (INR)
+              </label>
+              <input
+                id="daily-budget"
+                min="0"
+                onChange={(event) =>
+                  setPolicyDraft((current) => ({
+                    ...current,
+                    dailyBudget: event.target.value,
+                  }))
+                }
+                type="number"
+                value={policyDraft.dailyBudget}
+              />
+              <button
+                className="button primary publish-policy"
+                disabled={
+                  isWorking ||
+                  !policyDraft.allowedActions.length ||
+                  !policyDraft.maxActionAmount ||
+                  !policyDraft.dailyBudget
+                }
+                onClick={publishPolicy}
+                type="button"
+              >
+                Publish policy version
+              </button>
+              <small className="editor-note">
+                Publishing is immediate, versioned and appended to the audit chain.
+              </small>
+            </div>
+          </div>
         </section>
 
         <section className="panel approvals-panel" id="approvals">
@@ -938,6 +1377,95 @@ export default function Home() {
           )}
         </section>
 
+        <section className="assurance-grid">
+          <article className="panel evidence-panel" id="evidence">
+            <div className="panel-header">
+              <div>
+                <span className="panel-kicker">REPRODUCIBLE ASSURANCE</span>
+                <h3>Measured evaluation evidence</h3>
+              </div>
+              <button
+                className="text-button"
+                disabled={isWorking}
+                onClick={rerunBenchmark}
+                type="button"
+              >
+                Run benchmark ↻
+              </button>
+            </div>
+            {benchmark ? (
+              <>
+                <div className="evidence-metrics">
+                  <div>
+                    <span>LABELED ACCURACY</span>
+                    <strong>{benchmark.accuracy_percent}%</strong>
+                    <small>{benchmark.labeled_scenarios} policy boundaries</small>
+                  </div>
+                  <div>
+                    <span>P95 LATENCY</span>
+                    <strong>{benchmark.latency_ms.p95} ms</strong>
+                    <small>{benchmark.iterations.toLocaleString("en-IN")} evaluations</small>
+                  </div>
+                  <div>
+                    <span>OVERSPEND VIOLATIONS</span>
+                    <strong>{benchmark.concurrency.overspend_violations}</strong>
+                    <small>
+                      {benchmark.concurrency.requests} concurrent requests
+                    </small>
+                  </div>
+                  <div>
+                    <span>AUDIT INTEGRITY</span>
+                    <strong>{benchmark.audit_chain_verified ? "Verified" : "Failed"}</strong>
+                    <small>Both benchmark ledgers checked</small>
+                  </div>
+                </div>
+                <div className="percentile-row">
+                  <span>p50 {benchmark.latency_ms.p50} ms</span>
+                  <span>p95 {benchmark.latency_ms.p95} ms</span>
+                  <span>p99 {benchmark.latency_ms.p99} ms</span>
+                  <span>
+                    Reserved {formatCurrency(benchmark.concurrency.reserved_total)} /{" "}
+                    {formatCurrency(benchmark.concurrency.budget)}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="panel-loading">Running deterministic evidence suite…</div>
+            )}
+          </article>
+
+          <article className="panel integrations-panel" id="integrations">
+            <div className="panel-header">
+              <div>
+                <span className="panel-kicker">IMPLEMENTATION TRUTH</span>
+                <h3>Runtime and production path</h3>
+              </div>
+            </div>
+            <div className="integration-groups">
+              <div>
+                <span className="integration-label current">RUNNING NOW</span>
+                {["FastAPI gateway", "Python policy engine", "In-memory state"].map(
+                  (integration) => (
+                    <span className="integration-item" key={integration}>
+                      <i /> {integration}
+                    </span>
+                  ),
+                )}
+              </div>
+              <div>
+                <span className="integration-label roadmap">PRODUCTION ROADMAP</span>
+                {["OPA · Rego", "PostgreSQL · Redis", "Prometheus · Splunk"].map(
+                  (integration) => (
+                    <span className="integration-item roadmap" key={integration}>
+                      <i /> {integration}
+                    </span>
+                  ),
+                )}
+              </div>
+            </div>
+          </article>
+        </section>
+
         <section className="panel events-panel" id="audit-trail">
           <div className="panel-header">
             <div>
@@ -990,14 +1518,11 @@ export default function Home() {
             </span>
             <button
               className="text-button"
-              onClick={() =>
-                setNotice(
-                  `Evidence head ${auditStatus.head_hash.slice(0, 16)}… is ready for export.`,
-                )
-              }
+              disabled={isWorking}
+              onClick={exportEvidence}
               type="button"
             >
-              Export evidence ↗
+              Download evidence ↓
             </button>
           </div>
         </section>
@@ -1018,8 +1543,8 @@ export default function Home() {
             <p className="eyebrow">HIGH-IMPACT CONTROL</p>
             <h2 id="stop-title">Stop the entire agent fleet?</h2>
             <p id="stop-description">
-              All signed execution leases will be revoked immediately. New financial
-              actions will fail closed until an operator restores the fleet.
+              All active execution leases will be invalidated immediately. New
+              financial actions will fail closed until an operator restores the fleet.
             </p>
             <div className="modal-impact">
               <span>

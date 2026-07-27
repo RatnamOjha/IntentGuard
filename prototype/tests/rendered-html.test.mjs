@@ -31,9 +31,12 @@ test("server-renders the IntentGuard operator console", async () => {
   assert.match(html, /<title>IntentGuard \| Financial Agent Governance<\/title>/i);
   assert.match(html, /Financial agent control room/);
   assert.match(html, /Simulate an agent action/);
+  assert.match(html, /Stale lease after emergency stop/);
+  assert.match(html, /Permission and budget configuration/);
+  assert.match(html, /Measured evaluation evidence/);
+  assert.match(html, /Production roadmap/i);
   assert.match(html, /Emergency stop/);
   assert.match(html, /Live decisions/);
   assert.doesNotMatch(html, /Your site is taking shape/);
   assert.doesNotMatch(html, /react-loading-skeleton/);
 });
-

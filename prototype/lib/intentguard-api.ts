@@ -67,6 +67,25 @@ export type ApiAuditStatus = {
   head_hash: string;
 };
 
+export type ApiBenchmark = {
+  iterations: number;
+  labeled_scenarios: number;
+  accuracy_percent: number;
+  latency_ms: {
+    p50: number;
+    p95: number;
+    p99: number;
+  };
+  concurrency: {
+    requests: number;
+    allowed: number;
+    budget: string;
+    reserved_total: string;
+    overspend_violations: number;
+  };
+  audit_chain_verified: boolean;
+};
+
 export type ActionPayload = {
   request_id: string;
   agent_id: string;
@@ -131,6 +150,10 @@ export function getAuditStatus() {
   return apiRequest<ApiAuditStatus>("/v1/audit/status");
 }
 
+export function getBenchmark() {
+  return apiRequest<ApiBenchmark>("/v1/demo/benchmark");
+}
+
 export function authorizeAction(payload: ActionPayload) {
   return apiRequest<ApiAuthorization>("/v1/actions/authorize", {
     method: "POST",
@@ -155,6 +178,28 @@ export function setAgentRevocation(agentId: string, revoked: boolean) {
   return apiRequest(`/v1/agents/${agentId}/${revoked ? "revoke" : "restore"}`, {
     method: "POST",
   });
+}
+
+export function updateAgentPolicy(
+  agentId: string,
+  policy: {
+    allowed_actions: string[];
+    max_action_amount: string;
+    daily_budget: string;
+    active: boolean;
+  },
+) {
+  return apiRequest<{ agent: ApiAgent; policy_version: string }>(
+    `/v1/agents/${agentId}/policy`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        ...policy,
+        operator: "Ratnam Ojha",
+        reason: "Policy published from the IntentGuard operator console",
+      }),
+    },
+  );
 }
 
 export function setFleetStop(stopped: boolean) {

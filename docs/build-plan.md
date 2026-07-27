@@ -7,7 +7,12 @@ intercepts actions, evaluates policy and budgets, issues bounded authorization,
 and records what happened. Mock agents and banking connectors exist only to
 demonstrate enforcement.
 
-## Locked technology choices
+## Target production technology choices
+
+The executable first-round prototype intentionally uses the FastAPI gateway,
+deterministic Python policy engine, and in-memory state. The technologies below
+are the locked production path and are shown as roadmap—not running
+integrations—in the operator console.
 
 - React 19, TypeScript, and Vite
 - FastAPI and Python
@@ -115,4 +120,3 @@ focused on the shared governance layer.
 - Fleet stop blocks every agent.
 - Operators can inspect and verify a complete audit trail.
 - The dashboard shows measurable enforcement latency and fleet health.
-

@@ -13,6 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .benchmark import run_benchmark
 from .models import ActionRequest, AgentProfile, IntentPassport
 from .policy_engine import PolicyEngine
 
@@ -54,6 +55,15 @@ class IntentCreate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     expires_at: datetime
     required_attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentPolicyUpdate(BaseModel):
+    allowed_actions: set[str] = Field(min_length=1)
+    max_action_amount: Decimal = Field(ge=0)
+    daily_budget: Decimal = Field(ge=0)
+    active: bool = True
+    operator: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class ActionAuthorize(BaseModel):
@@ -288,6 +298,36 @@ def create_app(
         governance_engine().register_agent(agent)
         return jsonable_encoder(agent)
 
+    @app.put("/v1/agents/{agent_id}/policy", tags=["agents", "policies"])
+    def update_agent_policy(
+        agent_id: str, payload: AgentPolicyUpdate
+    ) -> dict[str, Any]:
+        try:
+            governance_engine().update_agent_policy(
+                agent_id,
+                allowed_actions=frozenset(payload.allowed_actions),
+                max_action_amount=payload.max_action_amount,
+                daily_budget=payload.daily_budget,
+                active=payload.active,
+                operator=payload.operator,
+                reason=payload.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        state = next(
+            item
+            for item in governance_engine().list_agent_states()
+            if item["agent_id"] == agent_id
+        )
+        return jsonable_encoder(
+            {
+                "agent": state,
+                "policy_version": governance_engine().policy_version,
+            }
+        )
+
     @app.post(
         "/v1/intents",
         status_code=status.HTTP_201_CREATED,
@@ -364,7 +404,31 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
+            reservation = governance_engine().get_reservation(reservation_id)
+            governance_engine().audit_ledger.append(
+                "connector.execution.rejected",
+                {
+                    "reservation_id": reservation_id,
+                    "request_id": (
+                        reservation.request_id if reservation is not None else None
+                    ),
+                    "agent_id": (
+                        reservation.agent_id if reservation is not None else None
+                    ),
+                    "reason": str(exc),
+                },
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        governance_engine().audit_ledger.append(
+            "connector.execution.succeeded",
+            {
+                "reservation_id": reservation.reservation_id,
+                "request_id": reservation.request_id,
+                "agent_id": reservation.agent_id,
+                "amount": reservation.amount,
+                "currency": reservation.currency,
+            },
+        )
         return jsonable_encoder(reservation)
 
     @app.post(
@@ -496,6 +560,10 @@ def create_app(
         app.state.engine = PolicyEngine()
         app.state.demo_bootstrapped = False
         return bootstrap_demo()
+
+    @app.get("/v1/demo/benchmark", tags=["demo", "operations"])
+    def demo_benchmark() -> dict[str, Any]:
+        return jsonable_encoder(run_benchmark())
 
     return app
 

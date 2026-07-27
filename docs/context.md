@@ -6,8 +6,8 @@ Build a real-time governance layer for autonomous financial agents.
 
 ## Current milestone
 
-Completing integration between the Vinext operator dashboard in `prototype/`
-and the FastAPI enforcement gateway.
+Preparing the integrated governance prototype and measurable evidence for the
+first-round submission.
 
 ## What currently works
 
@@ -22,6 +22,10 @@ and the FastAPI enforcement gateway.
 - Fleet-epoch invalidation of outstanding execution leases
 - Domain, concurrency, regression, and API tests
 - Vinext operator dashboard under `prototype/` on `main`
+- Live versioned permission and budget editor
+- Protected-connector stale-lease rejection demonstration
+- Reproducible accuracy, latency, concurrency, and audit benchmark
+- Downloadable audit evidence
 
 ## Architecture decisions
 
@@ -69,6 +73,9 @@ lifecycle so the policy check and budget hold are atomic.
 - [x] Add agent restoration to the engine and API
 - [x] Implement human approval workflow
 - [x] Connect the dashboard to the FastAPI runtime
+- [x] Add live policy and budget configuration
+- [x] Add stale-lease connector demonstration
+- [x] Add reproducible benchmark evidence
 - [ ] Add PostgreSQL and Redis adapters
 
 ## Work ownership

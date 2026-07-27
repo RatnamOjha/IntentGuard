@@ -11,6 +11,9 @@ The console demonstrates:
 - individual agent revocation and restoration;
 - a fleet-wide emergency stop;
 - append-only audit events and enforcement latency.
+- live versioned permission and budget configuration;
+- protected-connector rejection of stale execution leases;
+- reproducible accuracy, latency, concurrency, and audit evidence.
 
 All interactions call the FastAPI governance gateway. The console bootstraps a
 deterministic three-agent sandbox, evaluates scenarios through the real policy
@@ -19,8 +22,20 @@ and resolves high-risk requests through the operator approval queue.
 
 ## Run locally
 
-Start the FastAPI service from the repository root first. Requires Node.js
-22.13 or newer and pnpm.
+The simplest way to start both services is from the repository root:
+
+```bash
+./scripts/start-demo.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\start-demo.ps1
+```
+
+For frontend-only development, start the FastAPI service separately first.
+Requires Node.js 22.13 or newer and pnpm.
 
 ```bash
 pnpm install

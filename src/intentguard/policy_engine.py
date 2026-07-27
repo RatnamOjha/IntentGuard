@@ -38,6 +38,7 @@ class PolicyEngine:
         audit_ledger: AuditLedger | None = None,
     ) -> None:
         self.policy_version = policy_version
+        self._policy_revision = 0
         self.review_risk_threshold = review_risk_threshold
         self.audit_ledger = audit_ledger or AuditLedger()
         self._agents: dict[str, AgentProfile] = {}
@@ -88,6 +89,71 @@ class PolicyEngine:
                     "customer_id": intent.customer_id,
                 },
             )
+
+    def update_agent_policy(
+        self,
+        agent_id: str,
+        *,
+        allowed_actions: frozenset[str],
+        max_action_amount: Decimal,
+        daily_budget: Decimal,
+        active: bool,
+        operator: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> AgentProfile:
+        """Publish a new version of one agent's configurable policy envelope."""
+
+        if not allowed_actions:
+            raise ValueError("At least one permitted action is required.")
+        if max_action_amount < 0 or daily_budget < 0:
+            raise ValueError("Policy amounts cannot be negative.")
+
+        with self._lock:
+            current = self._agents.get(agent_id)
+            if current is None:
+                raise KeyError(f"Unknown agent: {agent_id}")
+            today = (now or datetime.now(timezone.utc)).date()
+            committed = self._daily_spend[(agent_id, today)]
+            reserved = self._reserved_spend[(agent_id, today)]
+            if daily_budget < committed + reserved:
+                raise ValueError(
+                    "The daily budget cannot be lower than today's committed "
+                    "and reserved exposure."
+                )
+
+            updated = replace(
+                current,
+                allowed_actions=allowed_actions,
+                max_action_amount=max_action_amount,
+                daily_budget=daily_budget,
+                active=active,
+            )
+            self._agents[agent_id] = updated
+            self._policy_revision += 1
+            self.policy_version = f"2026.07.r{self._policy_revision}"
+            self.audit_ledger.append(
+                "policy.updated",
+                {
+                    "agent_id": agent_id,
+                    "operator": operator,
+                    "reason": reason,
+                    "policy_version": self.policy_version,
+                    "previous": {
+                        "allowed_actions": sorted(current.allowed_actions),
+                        "max_action_amount": current.max_action_amount,
+                        "daily_budget": current.daily_budget,
+                        "active": current.active,
+                    },
+                    "current": {
+                        "allowed_actions": sorted(updated.allowed_actions),
+                        "max_action_amount": updated.max_action_amount,
+                        "daily_budget": updated.daily_budget,
+                        "active": updated.active,
+                    },
+                },
+            )
+            return updated
 
     def list_agent_states(
         self, *, now: datetime | None = None
@@ -649,16 +715,16 @@ class PolicyEngine:
             lease = self._leases.get(lease_id)
             if lease is None or lease.reservation_id != reservation_id:
                 raise ValueError("The execution lease is invalid for this reservation.")
-            if reservation.status is not ReservationStatus.HELD:
-                raise ValueError(
-                    f"Reservation is {reservation.status.value}, not held."
-                )
             if lease.is_expired(commit_time):
                 raise ValueError("The execution lease has expired.")
             if lease.fleet_epoch != self._fleet_epoch or self._fleet_stopped:
                 raise ValueError("The execution lease was invalidated by a fleet stop.")
             if reservation.agent_id in self._revoked_agents:
                 raise ValueError("The execution lease belongs to a revoked agent.")
+            if reservation.status is not ReservationStatus.HELD:
+                raise ValueError(
+                    f"Reservation is {reservation.status.value}, not held."
+                )
 
             key = (reservation.agent_id, reservation.budget_date)
             self._reserved_spend[key] -= reservation.amount

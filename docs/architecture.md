@@ -1,5 +1,10 @@
 # IntentGuard architecture
 
+This diagram is the target production architecture. The first-round executable
+prototype implements the same boundaries with FastAPI, a deterministic Python
+policy engine, and in-memory state; OPA, PostgreSQL, Redis, KMS, Prometheus,
+Grafana, and Splunk remain explicitly labeled production-roadmap components.
+
 ## System context
 
 IntentGuard sits between autonomous agents and financial tools. Agents never
@@ -157,4 +162,3 @@ prototype will replace this with:
 - an append-only event store for audit history;
 - FastAPI for the governance gateway;
 - React and TypeScript for the operator and reviewer interfaces.
-

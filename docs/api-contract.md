@@ -33,6 +33,7 @@ The frontend should use stable finding `code` values for filters and finding
 | GET | `/v1/fleet/status` | Fleet stop state and current epoch |
 | GET | `/v1/agents` | Agent permission, status, and live budget snapshots |
 | POST | `/v1/agents` | Register or update an agent profile |
+| PUT | `/v1/agents/{id}/policy` | Publish a versioned permission and budget envelope |
 | POST | `/v1/intents` | Register authenticated customer intent |
 | POST | `/v1/actions/authorize` | Evaluate policy and reserve budget atomically |
 | POST | `/v1/reservations/{id}/commit` | Consume held budget after success |
@@ -48,6 +49,7 @@ The frontend should use stable finding `code` values for filters and finding
 | GET | `/v1/audit/status` | Verify the SHA-256 chain and return its head |
 | POST | `/v1/demo/bootstrap` | Idempotently initialize the dashboard sandbox |
 | POST | `/v1/demo/reset` | Reset the deterministic dashboard sandbox |
+| GET | `/v1/demo/benchmark` | Run measured accuracy, latency, concurrency, and audit checks |
 
 ## Authorization example
 

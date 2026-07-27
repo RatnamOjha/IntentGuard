@@ -159,6 +159,41 @@ class PolicyEngineTest(unittest.TestCase):
             {finding.code for finding in second_result.findings},
         )
 
+    def test_operator_can_publish_agent_policy(self) -> None:
+        updated = self.engine.update_agent_policy(
+            "travel-01",
+            allowed_actions=frozenset({"book_flight", "book_hotel"}),
+            max_action_amount=Decimal("25000"),
+            daily_budget=Decimal("40000"),
+            active=True,
+            operator="Ratnam Ojha",
+            reason="Expand the travel pilot",
+        )
+
+        self.assertIn("book_hotel", updated.allowed_actions)
+        self.assertEqual("2026.07.r1", self.engine.policy_version)
+        self.assertEqual(
+            "policy.updated",
+            self.engine.audit_ledger.events[-1].event_type,
+        )
+
+    def test_policy_budget_cannot_drop_below_current_exposure(self) -> None:
+        request = self.action(amount="15000")
+        decision = self.engine.evaluate(request, now=self.now)
+        self.engine.record_execution(request, decision, executed_at=self.now)
+
+        with self.assertRaises(ValueError):
+            self.engine.update_agent_policy(
+                "travel-01",
+                allowed_actions=frozenset({"book_flight"}),
+                max_action_amount=Decimal("20000"),
+                daily_budget=Decimal("10000"),
+                active=True,
+                operator="Ratnam Ojha",
+                reason="Invalid reduction",
+                now=self.now,
+            )
+
     def test_revocation_is_immediate(self) -> None:
         self.engine.revoke_agent("travel-01")
         result = self.engine.evaluate(self.action(), now=self.now)

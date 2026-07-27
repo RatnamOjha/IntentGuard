@@ -41,10 +41,12 @@ governance gateway that demonstrate:
 - fleet-epoch invalidation of outstanding authorizations;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
-## Locked prototype stack
+## Production architecture and current prototype
 
 The listed challenge technologies are examples rather than requirements. We are
-using one coherent stack instead of attempting to use every suggested product:
+using one coherent production path instead of attempting to use every suggested
+product. The dashboard labels components as either running now or roadmap so
+the prototype does not overstate its implementation.
 
 | Layer | Selected technology | Responsibility |
 | --- | --- | --- |
@@ -58,38 +60,53 @@ using one coherent stack instead of attempting to use every suggested product:
 | Local runtime | Docker Compose | Reproducible end-to-end prototype |
 | Deployment path | AWS | ECS/Fargate, RDS, ElastiCache, and managed secrets |
 
+The current executable prototype uses React/Vinext, FastAPI, the deterministic
+Python policy engine, and in-memory state. OPA, PostgreSQL, Redis, Prometheus,
+Splunk, Docker Compose, and AWS are explicit production-roadmap components.
+
 ## Challenge task coverage
 
 | Required task | IntentGuard implementation |
 | --- | --- |
-| Granular agent permissions | Agent registry plus versioned OPA/Rego policies |
-| Dynamic spend caps | Atomic reserve/commit/release budget engine backed by Redis |
+| Granular agent permissions | Live versioned agent-policy editor plus deterministic runtime enforcement |
+| Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
-| Operator dashboard | Live React console for budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | Policy test suites, load tests, Prometheus metrics, and a hash-chained audit trail |
+| Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
+| Accuracy, latency, and auditability | Reproducible benchmark, concurrency tests, measured percentiles, and a hash-chained audit trail |
 
 ## Quick start
 
-Requires Python 3.9 or newer, Node.js 22.13 or newer, and pnpm.
+Requires Python 3.9 or newer, Node.js 22.13 or newer, and pnpm. Start the full
+demo with one command:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[api,dev]"
-python -m uvicorn intentguard.api:app --reload
+./scripts/start-demo.sh
 ```
 
-In a second terminal:
-
-```bash
-cd prototype
-pnpm install
-pnpm run dev
-```
-
-Open the live console at `http://localhost:3000`. It connects to the API at
-`http://127.0.0.1:8000` and initializes a deterministic three-agent sandbox.
+Open the local URL printed by Vinext, normally `http://localhost:3000`. It
+connects to the API at `http://127.0.0.1:8000` and initializes a deterministic
+three-agent sandbox.
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\start-demo.ps1
+```
+
+Run every backend and frontend check with:
+
+```bash
+./scripts/test-all.sh
+```
+
+The Windows equivalent is `.\scripts\test-all.ps1`.
+
+Generate reproducible accuracy, latency, concurrency, and audit evidence with:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m intentguard.benchmark
+```
 
 On Windows PowerShell, start the API with:
 
@@ -114,6 +131,11 @@ default. For deployed environments, set a comma-separated allowlist:
 $env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
 ```
 
+Submission resources:
+
+- [`docs/prototype-readiness.md`](docs/prototype-readiness.md) — critical-gap coverage and final checklist
+- [`docs/api-contract.md`](docs/api-contract.md) — live frontend/backend contract
+
 ## Demo scenarios
 
 The example evaluates four actions:
@@ -121,7 +143,9 @@ The example evaluates four actions:
 1. A compliant refundable flight booking is allowed.
 2. An over-budget booking is denied.
 3. A high-risk request is routed to human review.
-4. A valid request is denied after the fleet emergency stop is activated.
+4. A pre-stop execution lease is rejected by the protected connector after the
+   fleet epoch changes.
+5. A live policy edit changes an agent's next decision.
 
 ## Project structure
 

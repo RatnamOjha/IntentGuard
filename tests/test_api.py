@@ -91,6 +91,37 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(status_response.json()["stopped"])
         self.assertEqual(1, status_response.json()["fleet_epoch"])
 
+    def test_stale_lease_is_rejected_and_audited(self) -> None:
+        authorization = self.client.post(
+            "/v1/actions/authorize",
+            json=self.action("request-stale-lease"),
+        ).json()
+        self.client.post(
+            "/v1/fleet/stop",
+            json={"reason": "Stale lease demonstration"},
+        )
+
+        rejected = self.client.post(
+            (
+                f"/v1/reservations/"
+                f"{authorization['reservation']['reservation_id']}/commit"
+            ),
+            json={"lease_id": authorization["lease"]["lease_id"]},
+        )
+
+        self.assertEqual(409, rejected.status_code)
+        self.assertIn("fleet stop", rejected.json()["detail"])
+        events = self.client.get("/v1/audit/events").json()
+        connector_event = next(
+            event
+            for event in reversed(events)
+            if event["event_type"] == "connector.execution.rejected"
+        )
+        self.assertEqual(
+            "request-stale-lease",
+            connector_event["payload"]["request_id"],
+        )
+
     def test_audit_events_are_exposed(self) -> None:
         self.client.post("/v1/actions/authorize", json=self.action())
         response = self.client.get("/v1/audit/events")
@@ -169,6 +200,35 @@ class ApiTest(unittest.TestCase):
             {"Atlas", "Nova", "Orbit"},
             {agent["name"] for agent in agents},
         )
+
+    def test_operator_can_update_agent_policy(self) -> None:
+        response = self.client.put(
+            "/v1/agents/travel-01/policy",
+            json={
+                "allowed_actions": ["book_flight", "book_hotel"],
+                "max_action_amount": "25000",
+                "daily_budget": "40000",
+                "active": True,
+                "operator": "Ratnam Ojha",
+                "reason": "Expand the travel pilot",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("2026.07.r1", response.json()["policy_version"])
+        self.assertIn(
+            "book_hotel",
+            response.json()["agent"]["allowed_actions"],
+        )
+
+    def test_demo_benchmark_returns_measured_evidence(self) -> None:
+        response = self.client.get("/v1/demo/benchmark")
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual(100.0, body["accuracy_percent"])
+        self.assertEqual(0, body["concurrency"]["overspend_violations"])
+        self.assertTrue(body["audit_chain_verified"])
 
     def test_agent_can_be_revoked_and_restored(self) -> None:
         revoked = self.client.post("/v1/agents/travel-01/revoke")
