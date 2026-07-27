@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from time import perf_counter
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
@@ -19,6 +20,8 @@ from .policy_engine import PolicyEngine
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 )
@@ -77,6 +80,148 @@ class FleetStop(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class ApprovalResolution(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+def seed_demo_engine(engine: PolicyEngine) -> None:
+    """Populate a deterministic three-agent sandbox for the operator console."""
+
+    agents = (
+        AgentProfile(
+            agent_id="agt_travel_01",
+            name="Atlas",
+            allowed_actions=frozenset({"book_flight", "book_hotel"}),
+            max_action_amount=Decimal("50000"),
+            daily_budget=Decimal("100000"),
+        ),
+        AgentProfile(
+            agent_id="agt_service_02",
+            name="Nova",
+            allowed_actions=frozenset(
+                {"issue_service_credit", "replace_card", "reverse_annual_fee"}
+            ),
+            max_action_amount=Decimal("70000"),
+            daily_budget=Decimal("75000"),
+        ),
+        AgentProfile(
+            agent_id="agt_benefits_03",
+            name="Orbit",
+            allowed_actions=frozenset(
+                {"activate_benefit", "submit_benefit_claim"}
+            ),
+            max_action_amount=Decimal("40000"),
+            daily_budget=Decimal("50000"),
+        ),
+    )
+    for agent in agents:
+        engine.register_agent(agent)
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    intents = (
+        IntentPassport(
+            intent_id="intent_seed_atlas",
+            customer_id="demo-customer",
+            agent_id="agt_travel_01",
+            action="book_hotel",
+            max_amount=Decimal("50000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+        IntentPassport(
+            intent_id="intent_seed_nova",
+            customer_id="demo-customer",
+            agent_id="agt_service_02",
+            action="issue_service_credit",
+            max_amount=Decimal("70000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+        IntentPassport(
+            intent_id="intent_seed_orbit",
+            customer_id="demo-customer",
+            agent_id="agt_benefits_03",
+            action="submit_benefit_claim",
+            max_amount=Decimal("40000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+        IntentPassport(
+            intent_id="intent_travel_booking",
+            customer_id="demo-customer",
+            agent_id="agt_travel_01",
+            action="book_hotel",
+            max_amount=Decimal("18000"),
+            currency="INR",
+            expires_at=expires_at,
+            required_attributes={"city": "BOM", "refundable": True},
+        ),
+        IntentPassport(
+            intent_id="intent_service_credit",
+            customer_id="demo-customer",
+            agent_id="agt_service_02",
+            action="issue_service_credit",
+            max_amount=Decimal("25000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+        IntentPassport(
+            intent_id="intent_external_payment",
+            customer_id="demo-customer",
+            agent_id="agt_benefits_03",
+            action="pay_external_merchant",
+            max_amount=Decimal("35000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+        IntentPassport(
+            intent_id="intent_fee_reversal",
+            customer_id="demo-customer",
+            agent_id="agt_service_02",
+            action="reverse_annual_fee",
+            max_amount=Decimal("10000"),
+            currency="INR",
+            expires_at=expires_at,
+        ),
+    )
+    for intent in intents:
+        engine.register_intent(intent)
+
+    seed_actions = (
+        ActionRequest(
+            request_id="seed_atlas_spend",
+            agent_id="agt_travel_01",
+            action="book_hotel",
+            amount=Decimal("48320"),
+            currency="INR",
+            intent_id="intent_seed_atlas",
+            risk_score=10,
+        ),
+        ActionRequest(
+            request_id="seed_nova_spend",
+            agent_id="agt_service_02",
+            action="issue_service_credit",
+            amount=Decimal("69200"),
+            currency="INR",
+            intent_id="intent_seed_nova",
+            risk_score=10,
+        ),
+        ActionRequest(
+            request_id="seed_orbit_spend",
+            agent_id="agt_benefits_03",
+            action="submit_benefit_claim",
+            amount=Decimal("18600"),
+            currency="INR",
+            intent_id="intent_seed_orbit",
+            risk_score=10,
+        ),
+    )
+    for action in seed_actions:
+        decision = engine.evaluate(action)
+        engine.record_execution(action, decision)
+
+
 def create_app(
     engine: PolicyEngine | None = None,
     *,
@@ -105,6 +250,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.state.engine = engine or PolicyEngine()
+    app.state.demo_bootstrapped = False
 
     def governance_engine() -> PolicyEngine:
         return app.state.engine
@@ -120,6 +266,10 @@ def create_app(
             "stopped": current.fleet_stopped,
             "fleet_epoch": current.fleet_epoch,
         }
+
+    @app.get("/v1/agents", tags=["agents"])
+    def list_agents() -> list[dict[str, Any]]:
+        return jsonable_encoder(governance_engine().list_agent_states())
 
     @app.post(
         "/v1/agents",
@@ -176,10 +326,27 @@ def create_app(
             attributes=payload.attributes,
             occurred_at=occurred_at,
         )
+        started_at = perf_counter()
         try:
             result = governance_engine().authorize_action(request)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        latency_ms = round((perf_counter() - started_at) * 1000, 3)
+        governance_engine().audit_ledger.append(
+            "gateway.authorization.completed",
+            {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "action": request.action,
+                "amount": request.amount,
+                "currency": request.currency,
+                "decision": result.decision.decision.value,
+                "finding_codes": [
+                    finding.code for finding in result.decision.findings
+                ],
+                "latency_ms": latency_ms,
+            },
+        )
         return jsonable_encoder(result)
 
     @app.post(
@@ -253,9 +420,82 @@ def create_app(
     def resume_fleet() -> None:
         governance_engine().resume_fleet()
 
+    @app.get("/v1/approvals", tags=["approvals"])
+    def list_approvals() -> list[dict[str, Any]]:
+        return jsonable_encoder(governance_engine().list_approvals())
+
+    @app.post(
+        "/v1/approvals/{request_id}/approve",
+        tags=["approvals"],
+    )
+    def approve_action(
+        request_id: str, payload: ApprovalResolution
+    ) -> dict[str, Any]:
+        try:
+            result = governance_engine().approve_action(
+                request_id,
+                reviewer=payload.reviewer,
+                reason=payload.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return jsonable_encoder(result)
+
+    @app.post(
+        "/v1/approvals/{request_id}/reject",
+        tags=["approvals"],
+    )
+    def reject_action(
+        request_id: str, payload: ApprovalResolution
+    ) -> dict[str, Any]:
+        try:
+            approval = governance_engine().reject_action(
+                request_id,
+                reviewer=payload.reviewer,
+                reason=payload.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return jsonable_encoder(approval)
+
     @app.get("/v1/audit/events", tags=["audit"])
     def audit_events() -> list[dict[str, Any]]:
         return jsonable_encoder(governance_engine().audit_ledger.as_dicts())
+
+    @app.get("/v1/audit/status", tags=["audit"])
+    def audit_status() -> dict[str, Any]:
+        ledger = governance_engine().audit_ledger
+        events = ledger.events
+        return {
+            "verified": ledger.verify(),
+            "event_count": len(events),
+            "head_hash": events[-1].event_hash if events else ledger.GENESIS_HASH,
+        }
+
+    @app.post("/v1/demo/bootstrap", tags=["demo"])
+    def bootstrap_demo() -> dict[str, Any]:
+        if not app.state.demo_bootstrapped:
+            seed_demo_engine(governance_engine())
+            app.state.demo_bootstrapped = True
+        return {
+            "agents": jsonable_encoder(governance_engine().list_agent_states()),
+            "fleet": {
+                "stopped": governance_engine().fleet_stopped,
+                "fleet_epoch": governance_engine().fleet_epoch,
+            },
+            "approvals": jsonable_encoder(governance_engine().list_approvals()),
+            "audit_verified": governance_engine().audit_ledger.verify(),
+        }
+
+    @app.post("/v1/demo/reset", tags=["demo"])
+    def reset_demo() -> dict[str, Any]:
+        app.state.engine = PolicyEngine()
+        app.state.demo_bootstrapped = False
+        return bootstrap_demo()
 
     return app
 

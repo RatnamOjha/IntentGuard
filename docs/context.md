@@ -53,7 +53,7 @@ lifecycle so the policy check and budget hold are atomic.
 ## Current technical limitations
 
 - State is held in memory.
-- Human review is represented as a decision but has no workflow.
+- Human review uses an in-memory operator approval workflow.
 - Execution leases are opaque IDs rather than cryptographically signed tokens.
 - In-memory locking protects one process; Redis will coordinate multiple replicas.
 
@@ -67,7 +67,8 @@ lifecycle so the policy check and budget hold are atomic.
 - [x] Build dashboard shell
 - [x] Add configurable dashboard CORS origins
 - [x] Add agent restoration to the engine and API
-- [ ] Implement human approval workflow
+- [x] Implement human approval workflow
+- [x] Connect the dashboard to the FastAPI runtime
 - [ ] Add PostgreSQL and Redis adapters
 
 ## Work ownership

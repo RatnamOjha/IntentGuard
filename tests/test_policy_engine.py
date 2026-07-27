@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from intentguard import (  # noqa: E402
     ActionRequest,
     AgentProfile,
+    ApprovalStatus,
     Decision,
     IntentPassport,
     PolicyEngine,
@@ -96,6 +97,55 @@ class PolicyEngineTest(unittest.TestCase):
         )
         self.assertEqual(Decision.REVIEW, result.decision)
 
+    def test_operator_can_approve_high_risk_action(self) -> None:
+        authorization = self.engine.authorize_action(
+            self.action(request_id="request-review", risk_score=80),
+            now=self.now,
+        )
+        self.assertEqual(Decision.REVIEW, authorization.decision.decision)
+        self.assertEqual(
+            ApprovalStatus.PENDING,
+            self.engine.list_approvals()[0].status,
+        )
+
+        approved = self.engine.approve_action(
+            "request-review",
+            reviewer="operator-01",
+            reason="Verified with the card member",
+            now=self.now + timedelta(seconds=1),
+        )
+
+        self.assertEqual(Decision.ALLOW, approved.decision.decision)
+        self.assertIsNotNone(approved.reservation)
+        self.assertIsNotNone(approved.lease)
+        self.assertEqual(
+            ApprovalStatus.APPROVED,
+            self.engine.list_approvals()[0].status,
+        )
+        self.assertIn(
+            "HUMAN_APPROVAL_GRANTED",
+            {finding.code for finding in approved.decision.findings},
+        )
+
+    def test_operator_can_reject_high_risk_action(self) -> None:
+        self.engine.authorize_action(
+            self.action(request_id="request-rejected", risk_score=80),
+            now=self.now,
+        )
+
+        rejected = self.engine.reject_action(
+            "request-rejected",
+            reviewer="operator-01",
+            reason="Customer could not be verified",
+            now=self.now + timedelta(seconds=1),
+        )
+
+        self.assertEqual(ApprovalStatus.REJECTED, rejected.status)
+        self.assertIn(
+            "approval.rejected",
+            {event.event_type for event in self.engine.audit_ledger.events},
+        )
+
     def test_enforces_daily_budget_after_execution(self) -> None:
         first = self.action(request_id="request-first", amount="17000")
         first_result = self.engine.evaluate(first, now=self.now)
@@ -156,4 +206,3 @@ class PolicyEngineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

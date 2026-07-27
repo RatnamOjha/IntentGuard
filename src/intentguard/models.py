@@ -26,6 +26,14 @@ class ReservationStatus(str, Enum):
     EXPIRED = "expired"
 
 
+class ApprovalStatus(str, Enum):
+    """Lifecycle states for a human-review request."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True)
 class AgentProfile:
     """Registration and policy envelope assigned to a financial agent."""
@@ -133,3 +141,20 @@ class AuthorizationResult:
     decision: DecisionRecord
     reservation: BudgetReservation | None = None
     lease: AuthorizationLease | None = None
+
+
+@dataclass(frozen=True)
+class HumanApproval:
+    """Operator decision required before a high-risk action can execute."""
+
+    request_id: str
+    agent_id: str
+    action: str
+    amount: Decimal
+    currency: str
+    risk_score: int
+    created_at: datetime
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    reviewer: str | None = None
+    reason: str | None = None
+    resolved_at: datetime | None = None

@@ -33,13 +33,13 @@ governance gateway that demonstrate:
 - registered-agent and action-level permissions;
 - intent-bound amount, currency, and contextual constraints;
 - per-action and rolling daily spend limits;
-- risk-based human review;
+- an operator approval queue for high-risk actions;
 - individual-agent revocation;
 - an emergency fleet stop;
 - hash-chained audit events with integrity verification.
 - concurrency-safe budget reservations and short-lived execution leases;
 - fleet-epoch invalidation of outstanding authorizations;
-- a frontend-ready REST and OpenAPI contract.
+- a live React dashboard connected to the REST and OpenAPI contract.
 
 ## Locked prototype stack
 
@@ -65,19 +65,33 @@ using one coherent stack instead of attempting to use every suggested product:
 | Granular agent permissions | Agent registry plus versioned OPA/Rego policies |
 | Dynamic spend caps | Atomic reserve/commit/release budget engine backed by Redis |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
-| Operator dashboard | React console for policy, budget, activity, controls, and audit |
+| Operator dashboard | Live React console for budgets, approvals, fleet controls, and audit |
 | Accuracy, latency, and auditability | Policy test suites, load tests, Prometheus metrics, and a hash-chained audit trail |
 
 ## Quick start
 
-Requires Python 3.9 or newer.
+Requires Python 3.9 or newer, Node.js 22.13 or newer, and pnpm.
 
 ```bash
-python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 examples/demo.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[api,dev]"
+python -m uvicorn intentguard.api:app --reload
 ```
 
-On Windows PowerShell, install and run the API with:
+In a second terminal:
+
+```bash
+cd prototype
+pnpm install
+pnpm run dev
+```
+
+Open the live console at `http://localhost:3000`. It connects to the API at
+`http://127.0.0.1:8000` and initializes a deterministic three-agent sandbox.
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+
+On Windows PowerShell, start the API with:
 
 ```powershell
 python -m venv .venv
@@ -93,8 +107,8 @@ Then open `http://127.0.0.1:8000/docs`. The shared frontend contract is in
 With the standard Windows Python distribution, replace `.venv\bin` with
 `.venv\Scripts` in these commands.
 
-The API accepts the Vinext dashboard origins on ports 3000 and 5173 by default.
-For deployed environments, set a comma-separated allowlist:
+The API accepts the Vinext dashboard origins on ports 3000, 3001, and 5173 by
+default. For deployed environments, set a comma-separated allowlist:
 
 ```powershell
 $env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"

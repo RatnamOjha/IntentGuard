@@ -9,8 +9,13 @@ and operator dashboard. During local development it runs at
 
 ```text
 POST /v1/actions/authorize
-  -> deny or review: display the decision and findings
+  -> deny: display the decision and findings
+  -> review: create a pending operator approval
   -> allow: receive reservation_id and lease_id
+
+Operator resolves a review
+  -> approve: receive a fresh reservation_id and lease_id
+  -> reject: seal a final denial in the audit chain
 
 Protected connector executes the approved action
   -> success: POST /v1/reservations/{id}/commit
@@ -26,6 +31,7 @@ The frontend should use stable finding `code` values for filters and finding
 |---|---|---|
 | GET | `/health` | Service health |
 | GET | `/v1/fleet/status` | Fleet stop state and current epoch |
+| GET | `/v1/agents` | Agent permission, status, and live budget snapshots |
 | POST | `/v1/agents` | Register or update an agent profile |
 | POST | `/v1/intents` | Register authenticated customer intent |
 | POST | `/v1/actions/authorize` | Evaluate policy and reserve budget atomically |
@@ -35,7 +41,13 @@ The frontend should use stable finding `code` values for filters and finding
 | POST | `/v1/agents/{id}/restore` | Restore a revoked registered agent |
 | POST | `/v1/fleet/stop` | Stop the fleet and invalidate outstanding leases |
 | POST | `/v1/fleet/resume` | Resume new evaluations at the current epoch |
+| GET | `/v1/approvals` | Return the operator approval queue |
+| POST | `/v1/approvals/{id}/approve` | Approve and issue a fresh bounded lease |
+| POST | `/v1/approvals/{id}/reject` | Reject and record the final denial |
 | GET | `/v1/audit/events` | Return the ordered audit stream |
+| GET | `/v1/audit/status` | Verify the SHA-256 chain and return its head |
+| POST | `/v1/demo/bootstrap` | Idempotently initialize the dashboard sandbox |
+| POST | `/v1/demo/reset` | Reset the deterministic dashboard sandbox |
 
 ## Authorization example
 
@@ -93,9 +105,10 @@ can display their structured findings.
 
 ## Browser origins
 
-The gateway allows the Vinext dashboard at `localhost:3000` and
-`127.0.0.1:3000` by default. Vite origins on port 5173 remain supported.
-Override the complete allowlist with a comma-separated environment variable:
+The gateway allows the Vinext dashboard on ports `3000` and `3001` for both
+`localhost` and `127.0.0.1` by default. Vite origins on port 5173 remain
+supported. Override the complete allowlist with a comma-separated environment
+variable:
 
 ```text
 INTENTGUARD_CORS_ORIGINS=https://operator.example.com,https://review.example.com

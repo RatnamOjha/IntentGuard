@@ -12,13 +12,15 @@ The console demonstrates:
 - a fleet-wide emergency stop;
 - append-only audit events and enforcement latency.
 
-All interactions currently use deterministic in-memory demo state. The Python
-policy-engine foundation in the repository root is the starting point for the
-FastAPI, OPA, PostgreSQL, and Redis integration.
+All interactions call the FastAPI governance gateway. The console bootstraps a
+deterministic three-agent sandbox, evaluates scenarios through the real policy
+engine, commits allowed budget reservations, controls live revocation state,
+and resolves high-risk requests through the operator approval queue.
 
 ## Run locally
 
-Requires Node.js 22.13 or newer and pnpm.
+Start the FastAPI service from the repository root first. Requires Node.js
+22.13 or newer and pnpm.
 
 ```bash
 pnpm install
@@ -27,6 +29,12 @@ pnpm run dev
 
 Open `http://localhost:3000`.
 
+The dashboard uses `http://127.0.0.1:8000` by default. Override it when needed:
+
+```bash
+NEXT_PUBLIC_INTENTGUARD_API_URL=http://localhost:8000 pnpm run dev
+```
+
 ## Validate
 
 ```bash
@@ -34,7 +42,5 @@ pnpm run lint
 pnpm test
 ```
 
-The production build uses Vinext and the included Sites/Cloudflare worker
-configuration. `.openai/hosting.json` stores the associated private Sites
-project ID; it contains no source-repository credentials.
-
+The production build uses Vinext and the included Cloudflare worker
+configuration.

@@ -98,6 +98,77 @@ class ApiTest(unittest.TestCase):
         event_types = {event["event_type"] for event in response.json()}
         self.assertIn("policy.evaluated", event_types)
         self.assertIn("budget.reserved", event_types)
+        self.assertIn("gateway.authorization.completed", event_types)
+
+        status_response = self.client.get("/v1/audit/status")
+        self.assertTrue(status_response.json()["verified"])
+        self.assertGreater(status_response.json()["event_count"], 0)
+
+    def test_human_review_can_be_approved_and_committed(self) -> None:
+        payload = self.action("request-review")
+        payload["risk_score"] = 85
+        authorization = self.client.post(
+            "/v1/actions/authorize",
+            json=payload,
+        )
+        self.assertEqual("review", authorization.json()["decision"]["decision"])
+
+        approvals = self.client.get("/v1/approvals").json()
+        self.assertEqual("pending", approvals[0]["status"])
+        approved = self.client.post(
+            "/v1/approvals/request-review/approve",
+            json={
+                "reviewer": "Ratnam Ojha",
+                "reason": "Verified with the card member",
+            },
+        )
+        self.assertEqual(200, approved.status_code)
+        approved_body = approved.json()
+        self.assertEqual("allow", approved_body["decision"]["decision"])
+        self.assertEqual("held", approved_body["reservation"]["status"])
+
+        committed = self.client.post(
+            (
+                f"/v1/reservations/"
+                f"{approved_body['reservation']['reservation_id']}/commit"
+            ),
+            json={"lease_id": approved_body["lease"]["lease_id"]},
+        )
+        self.assertEqual("committed", committed.json()["status"])
+
+    def test_human_review_can_be_rejected(self) -> None:
+        payload = self.action("request-rejected")
+        payload["risk_score"] = 85
+        self.client.post("/v1/actions/authorize", json=payload)
+
+        rejected = self.client.post(
+            "/v1/approvals/request-rejected/reject",
+            json={
+                "reviewer": "Ratnam Ojha",
+                "reason": "Card member denied the request",
+            },
+        )
+        self.assertEqual(200, rejected.status_code)
+        self.assertEqual("rejected", rejected.json()["status"])
+
+    def test_demo_bootstrap_is_idempotent_and_exposes_agents(self) -> None:
+        from intentguard.api import create_app
+
+        demo_client = TestClient(create_app(PolicyEngine()))
+        first = demo_client.post("/v1/demo/bootstrap")
+        second = demo_client.post("/v1/demo/bootstrap")
+
+        self.assertEqual(200, first.status_code)
+        self.assertEqual(3, len(first.json()["agents"]))
+        self.assertEqual(
+            first.json()["agents"],
+            second.json()["agents"],
+        )
+        agents = demo_client.get("/v1/agents").json()
+        self.assertEqual(
+            {"Atlas", "Nova", "Orbit"},
+            {agent["name"] for agent in agents},
+        )
 
     def test_agent_can_be_revoked_and_restored(self) -> None:
         revoked = self.client.post("/v1/agents/travel-01/revoke")
@@ -125,6 +196,8 @@ class ApiTest(unittest.TestCase):
         for origin in (
             "http://localhost:3000",
             "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
         ):
             with self.subTest(origin=origin):
                 response = self.client.options(

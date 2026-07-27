@@ -14,11 +14,13 @@ from .audit import AuditLedger
 from .models import (
     ActionRequest,
     AgentProfile,
+    ApprovalStatus,
     AuthorizationLease,
     AuthorizationResult,
     BudgetReservation,
     Decision,
     DecisionRecord,
+    HumanApproval,
     IntentPassport,
     PolicyFinding,
     ReservationStatus,
@@ -52,6 +54,7 @@ class PolicyEngine:
         self._authorizations: dict[
             str, tuple[ActionRequest, AuthorizationResult]
         ] = {}
+        self._approvals: dict[str, HumanApproval] = {}
         self._fleet_stopped = False
         self._fleet_epoch = 0
         self._lock = RLock()
@@ -84,6 +87,50 @@ class PolicyEngine:
                     "agent_id": intent.agent_id,
                     "customer_id": intent.customer_id,
                 },
+            )
+
+    def list_agent_states(
+        self, *, now: datetime | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        """Return operator-safe runtime and budget state for every agent."""
+
+        snapshot_time = now or datetime.now(timezone.utc)
+        with self._lock:
+            self._expire_reservations_unlocked(snapshot_time)
+            states: list[dict[str, Any]] = []
+            for agent in sorted(self._agents.values(), key=lambda item: item.agent_id):
+                key = (agent.agent_id, snapshot_time.date())
+                spent = self._daily_spend[key]
+                reserved = self._reserved_spend[key]
+                states.append(
+                    {
+                        "agent_id": agent.agent_id,
+                        "name": agent.name,
+                        "active": agent.active,
+                        "revoked": agent.agent_id in self._revoked_agents,
+                        "allowed_actions": sorted(agent.allowed_actions),
+                        "max_action_amount": agent.max_action_amount,
+                        "daily_budget": agent.daily_budget,
+                        "spent_today": spent,
+                        "reserved_today": reserved,
+                        "remaining_budget": max(
+                            agent.daily_budget - spent - reserved,
+                            Decimal("0"),
+                        ),
+                    }
+                )
+            return tuple(states)
+
+    def list_approvals(self) -> tuple[HumanApproval, ...]:
+        """Return newest human-review requests first."""
+
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._approvals.values(),
+                    key=lambda approval: approval.created_at,
+                    reverse=True,
+                )
             )
 
     def revoke_agent(self, agent_id: str) -> None:
@@ -337,61 +384,237 @@ class PolicyEngine:
                 return previous_result
 
             decision = self._evaluate_unlocked(request, now=evaluation_time)
-            if decision.decision is not Decision.ALLOW:
+            if decision.decision is Decision.REVIEW:
+                approval = HumanApproval(
+                    request_id=request.request_id,
+                    agent_id=request.agent_id,
+                    action=request.action,
+                    amount=request.amount,
+                    currency=request.currency,
+                    risk_score=request.risk_score,
+                    created_at=evaluation_time,
+                )
+                self._approvals[request.request_id] = approval
+                result = AuthorizationResult(decision=decision)
+                self._authorizations[request.request_id] = (request, result)
+                self.audit_ledger.append(
+                    "approval.requested",
+                    {
+                        "request_id": request.request_id,
+                        "agent_id": request.agent_id,
+                        "action": request.action,
+                        "amount": request.amount,
+                        "currency": request.currency,
+                        "risk_score": request.risk_score,
+                    },
+                )
+                return result
+            if decision.decision is Decision.DENY:
                 result = AuthorizationResult(decision=decision)
                 self._authorizations[request.request_id] = (request, result)
                 return result
 
-            expires_at = evaluation_time + lease_ttl
-            reservation = BudgetReservation(
-                reservation_id=f"res_{uuid4().hex}",
-                request_id=request.request_id,
-                agent_id=request.agent_id,
-                amount=request.amount,
-                currency=request.currency,
-                budget_date=evaluation_time.date(),
-                expires_at=expires_at,
-            )
-            lease = AuthorizationLease(
-                lease_id=f"lease_{uuid4().hex}",
-                request_id=request.request_id,
-                agent_id=request.agent_id,
-                reservation_id=reservation.reservation_id,
-                fleet_epoch=self._fleet_epoch,
-                issued_at=evaluation_time,
-                expires_at=expires_at,
-            )
-            key = (request.agent_id, reservation.budget_date)
-            self._reserved_spend[key] += request.amount
-            self._reservations[reservation.reservation_id] = reservation
-            self._leases[lease.lease_id] = lease
-
-            decision = replace(
+            return self._issue_authorization_unlocked(
+                request,
                 decision,
-                remaining_daily_budget=max(
-                    decision.remaining_daily_budget - request.amount,
-                    Decimal("0"),
+                evaluation_time=evaluation_time,
+                lease_ttl=lease_ttl,
+            )
+
+    def approve_action(
+        self,
+        request_id: str,
+        *,
+        reviewer: str,
+        reason: str,
+        now: datetime | None = None,
+        lease_ttl: timedelta = timedelta(seconds=30),
+    ) -> AuthorizationResult:
+        """Approve a pending review and issue a fresh bounded execution lease."""
+
+        if lease_ttl.total_seconds() <= 0:
+            raise ValueError("The execution lease TTL must be positive.")
+        resolution_time = now or datetime.now(timezone.utc)
+        with self._lock:
+            self._expire_reservations_unlocked(resolution_time)
+            approval = self._approvals.get(request_id)
+            if approval is None:
+                raise KeyError(f"Unknown approval request: {request_id}")
+            if approval.status is ApprovalStatus.APPROVED:
+                return self._authorizations[request_id][1]
+            if approval.status is ApprovalStatus.REJECTED:
+                raise ValueError("The approval request has already been rejected.")
+
+            request, _ = self._authorizations[request_id]
+            current_decision = self._evaluate_unlocked(
+                request,
+                now=resolution_time,
+            )
+            if current_decision.decision is Decision.DENY:
+                raise ValueError(
+                    "The action no longer satisfies runtime policy: "
+                    f"{current_decision.explanation}"
+                )
+
+            approved_decision = replace(
+                current_decision,
+                decision=Decision.ALLOW,
+                findings=tuple(
+                    finding
+                    for finding in current_decision.findings
+                    if finding.code != "HUMAN_APPROVAL_REQUIRED"
+                )
+                + (
+                    PolicyFinding(
+                        code="HUMAN_APPROVAL_GRANTED",
+                        message=f"Operator {reviewer} approved the high-risk action.",
+                        blocking=False,
+                    ),
                 ),
             )
-            result = AuthorizationResult(
-                decision=decision,
-                reservation=reservation,
-                lease=lease,
+            self._approvals[request_id] = replace(
+                approval,
+                status=ApprovalStatus.APPROVED,
+                reviewer=reviewer,
+                reason=reason,
+                resolved_at=resolution_time,
             )
-            self._authorizations[request.request_id] = (request, result)
             self.audit_ledger.append(
-                "budget.reserved",
+                "approval.approved",
                 {
-                    "reservation_id": reservation.reservation_id,
-                    "request_id": request.request_id,
+                    "request_id": request_id,
                     "agent_id": request.agent_id,
-                    "amount": request.amount,
-                    "currency": request.currency,
-                    "expires_at": expires_at,
-                    "fleet_epoch": self._fleet_epoch,
+                    "reviewer": reviewer,
+                    "reason": reason,
                 },
             )
-            return result
+            return self._issue_authorization_unlocked(
+                request,
+                approved_decision,
+                evaluation_time=resolution_time,
+                lease_ttl=lease_ttl,
+            )
+
+    def reject_action(
+        self,
+        request_id: str,
+        *,
+        reviewer: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> HumanApproval:
+        """Reject a pending review and replace its decision with a final denial."""
+
+        resolution_time = now or datetime.now(timezone.utc)
+        with self._lock:
+            approval = self._approvals.get(request_id)
+            if approval is None:
+                raise KeyError(f"Unknown approval request: {request_id}")
+            if approval.status is ApprovalStatus.REJECTED:
+                return approval
+            if approval.status is ApprovalStatus.APPROVED:
+                raise ValueError("The approval request has already been approved.")
+
+            request, previous_result = self._authorizations[request_id]
+            rejected_decision = replace(
+                previous_result.decision,
+                decision=Decision.DENY,
+                findings=tuple(
+                    finding
+                    for finding in previous_result.decision.findings
+                    if finding.code != "HUMAN_APPROVAL_REQUIRED"
+                )
+                + (
+                    PolicyFinding(
+                        code="HUMAN_APPROVAL_REJECTED",
+                        message=f"Operator {reviewer} rejected the high-risk action.",
+                        blocking=True,
+                    ),
+                ),
+            )
+            self._authorizations[request_id] = (
+                request,
+                AuthorizationResult(decision=rejected_decision),
+            )
+            rejected = replace(
+                approval,
+                status=ApprovalStatus.REJECTED,
+                reviewer=reviewer,
+                reason=reason,
+                resolved_at=resolution_time,
+            )
+            self._approvals[request_id] = rejected
+            self.audit_ledger.append(
+                "approval.rejected",
+                {
+                    "request_id": request_id,
+                    "agent_id": request.agent_id,
+                    "reviewer": reviewer,
+                    "reason": reason,
+                },
+            )
+            return rejected
+
+    def _issue_authorization_unlocked(
+        self,
+        request: ActionRequest,
+        decision: DecisionRecord,
+        *,
+        evaluation_time: datetime,
+        lease_ttl: timedelta,
+    ) -> AuthorizationResult:
+        """Reserve budget and issue a lease while the engine lock is held."""
+
+        expires_at = evaluation_time + lease_ttl
+        reservation = BudgetReservation(
+            reservation_id=f"res_{uuid4().hex}",
+            request_id=request.request_id,
+            agent_id=request.agent_id,
+            amount=request.amount,
+            currency=request.currency,
+            budget_date=evaluation_time.date(),
+            expires_at=expires_at,
+        )
+        lease = AuthorizationLease(
+            lease_id=f"lease_{uuid4().hex}",
+            request_id=request.request_id,
+            agent_id=request.agent_id,
+            reservation_id=reservation.reservation_id,
+            fleet_epoch=self._fleet_epoch,
+            issued_at=evaluation_time,
+            expires_at=expires_at,
+        )
+        key = (request.agent_id, reservation.budget_date)
+        self._reserved_spend[key] += request.amount
+        self._reservations[reservation.reservation_id] = reservation
+        self._leases[lease.lease_id] = lease
+
+        decision = replace(
+            decision,
+            remaining_daily_budget=max(
+                decision.remaining_daily_budget - request.amount,
+                Decimal("0"),
+            ),
+        )
+        result = AuthorizationResult(
+            decision=decision,
+            reservation=reservation,
+            lease=lease,
+        )
+        self._authorizations[request.request_id] = (request, result)
+        self.audit_ledger.append(
+            "budget.reserved",
+            {
+                "reservation_id": reservation.reservation_id,
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "amount": request.amount,
+                "currency": request.currency,
+                "expires_at": expires_at,
+                "fleet_epoch": self._fleet_epoch,
+            },
+        )
+        return result
 
     @staticmethod
     def _same_idempotent_request(
@@ -585,4 +808,3 @@ class PolicyEngine:
                         blocking=True,
                     )
                 )
-
