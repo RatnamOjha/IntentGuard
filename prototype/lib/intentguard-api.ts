@@ -6,6 +6,14 @@ export type ApiFinding = {
   blocking: boolean;
 };
 
+export type ApiRiskAssessment = {
+  /** Self-reported by the agent. Untrusted: it can only raise the effective score. */
+  declared: number;
+  /** Computed by the gateway from state the agent cannot forge. */
+  derived: number;
+  signals: string[];
+};
+
 export type ApiAuthorization = {
   decision: {
     request_id: string;
@@ -13,6 +21,7 @@ export type ApiAuthorization = {
     findings: ApiFinding[];
     remaining_daily_budget: string;
     policy_version: string;
+    risk: ApiRiskAssessment | null;
   };
   reservation: {
     reservation_id: string;

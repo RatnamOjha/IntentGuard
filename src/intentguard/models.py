@@ -90,6 +90,28 @@ class PolicyFinding:
 
 
 @dataclass(frozen=True)
+class RiskAssessment:
+    """Risk the gateway derived, and how the agent's own claim compared.
+
+    ``declared`` is supplied by the agent and is untrusted. ``derived`` is
+    computed by the gateway from state the agent cannot forge. ``effective`` is
+    the maximum of the two: an agent may raise its own risk but never lower it.
+    """
+
+    declared: int
+    derived: int
+    signals: tuple[str, ...] = ()
+
+    @property
+    def effective(self) -> int:
+        return max(self.declared, self.derived)
+
+    @property
+    def under_declared(self) -> bool:
+        return self.declared < self.derived
+
+
+@dataclass(frozen=True)
 class DecisionRecord:
     """Complete, explainable result of a policy evaluation."""
 
@@ -98,6 +120,7 @@ class DecisionRecord:
     findings: tuple[PolicyFinding, ...]
     remaining_daily_budget: Decimal
     policy_version: str
+    risk: RiskAssessment | None = None
 
     @property
     def explanation(self) -> str:

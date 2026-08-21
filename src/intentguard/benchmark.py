@@ -42,6 +42,7 @@ def _configured_engine(
     intent_ttl: timedelta = timedelta(hours=1),
     intent_agent_id: str = "benchmark-agent",
     intent_action: str = "book_hotel",
+    intent_attributes: dict[str, Any] | None = None,
 ) -> tuple[PolicyEngine, datetime]:
     now = datetime.now(timezone.utc)
     engine = PolicyEngine()
@@ -64,7 +65,11 @@ def _configured_engine(
             max_amount=Decimal(intent_max_amount),
             currency="INR",
             expires_at=now + intent_ttl,
-            required_attributes={"refundable": True},
+            required_attributes=(
+                {"refundable": True}
+                if intent_attributes is None
+                else intent_attributes
+            ),
         )
     )
     return engine, now
@@ -511,6 +516,53 @@ def _run_acceptance_suite() -> tuple[list[dict[str, Any]], list[PolicyEngine]]:
             passed=expiry_rejected,
             expected="rejected after lease expiry",
             observed=expiry_observed,
+        )
+    )
+
+    # The agent is untrusted, so its self-reported risk may only raise the
+    # effective score. An intent that does not pin refundability leaves that
+    # choice to the agent, which is where a risk score has to do real work.
+    under_declared, under_declared_now = configured(
+        daily_budget="20000",
+        intent_max_amount="18000",
+        intent_attributes={},
+    )
+    decision(
+        "Under-declared risk still routes to review",
+        "risk integrity",
+        under_declared,
+        under_declared_now,
+        _request(
+            "control-risk-under-declared",
+            amount="18000",
+            risk_score=0,
+            attributes={"refundable": False},
+        ),
+        Decision.REVIEW,
+        "RISK_SCORE_UNDER_DECLARED",
+    )
+
+    monotonic, monotonic_now = configured()
+    monotonic_violations: list[str] = []
+    for declared in (0, 25, 50, 69, 70, 100):
+        assessed = monotonic.evaluate(
+            _request(f"control-risk-monotonic-{declared}", risk_score=declared),
+            now=monotonic_now,
+        )
+        risk = assessed.risk
+        if risk is None or risk.effective != max(declared, risk.derived):
+            monotonic_violations.append(f"declared={declared}")
+    results.append(
+        _control_case(
+            name="Declared risk can raise but never lower the derived score",
+            category="risk integrity",
+            passed=not monotonic_violations,
+            expected="effective == max(declared, derived) for every declaration",
+            observed=(
+                "monotonic across 0-100"
+                if not monotonic_violations
+                else f"violated at {', '.join(monotonic_violations)}"
+            ),
         )
     )
 

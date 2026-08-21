@@ -38,7 +38,11 @@ class AuthorizationFlowTest(unittest.TestCase):
                 customer_id="customer-01",
                 agent_id="payments-01",
                 action="transfer",
-                max_amount=Decimal("20000"),
+                # Deliberately well above the 20,000 request amount: these tests
+                # isolate reservation and budget serialization, so the requests
+                # should not also sit at the top of the intent envelope and pull
+                # gateway-derived risk toward the review threshold.
+                max_amount=Decimal("50000"),
                 currency="INR",
                 expires_at=self.now + timedelta(hours=1),
             )

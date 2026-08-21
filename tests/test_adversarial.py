@@ -47,6 +47,7 @@ def build_engine(
     daily_budget: str = "40000",
     max_action_amount: str = "25000",
     intent_max_amount: str = "18000",
+    intent_attributes: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> tuple[PolicyEngine, datetime]:
     """An agent authorized for refundable bookings up to INR 18,000.
@@ -76,7 +77,11 @@ def build_engine(
             max_amount=Decimal(intent_max_amount),
             currency="INR",
             expires_at=now + timedelta(hours=2),
-            required_attributes={"refundable": True},
+            required_attributes=(
+                {"refundable": True}
+                if intent_attributes is None
+                else intent_attributes
+            ),
         )
     )
     return engine, now
@@ -581,6 +586,137 @@ class FleetEpochBypassTest(unittest.TestCase):
             now=self.now,
         )
         self.assertEqual(Decimal("1000"), spent_today(self.engine, self.now))
+
+
+class SelfReportedRiskTest(unittest.TestCase):
+    """7. The agent grading its own risk to duck human approval."""
+
+    def setUp(self) -> None:
+        # Ceiling 18,000 against a 20,000 daily cap: a maxed booking sits at the
+        # top of both envelopes. The intent deliberately does not pin
+        # refundability, so choosing a non-refundable commitment is the agent's
+        # discretion rather than a blocking envelope violation -- which is
+        # exactly the case where a risk score has to do real work.
+        self.engine, self.now = build_engine(
+            daily_budget="20000", intent_attributes={}
+        )
+
+    def test_declared_risk_can_never_lower_the_effective_score(self) -> None:
+        """Monotonicity: the agent's number may raise risk, never reduce it."""
+
+        for declared in (0, 1, 25, 50, 69, 70, 99, 100):
+            with self.subTest(declared=declared):
+                decision = self.engine.evaluate(
+                    booking(f"mono-{declared}", amount="5000", risk_score=declared),
+                    now=self.now,
+                )
+                assert decision.risk is not None
+                self.assertGreaterEqual(decision.risk.effective, declared)
+                self.assertGreaterEqual(decision.risk.effective, decision.risk.derived)
+                self.assertEqual(
+                    max(declared, decision.risk.derived),
+                    decision.risk.effective,
+                )
+
+    def test_declaring_zero_does_not_buy_a_lower_score(self) -> None:
+        """Under-declaring gains the agent nothing at all."""
+
+        honest = self.engine.evaluate(
+            booking("honest", amount="9000", risk_score=40), now=self.now
+        )
+        lying = self.engine.evaluate(
+            booking("lying", amount="9000", risk_score=0), now=self.now
+        )
+        assert honest.risk is not None and lying.risk is not None
+
+        # Same action, so the gateway derives the same number for both.
+        self.assertEqual(honest.risk.derived, lying.risk.derived)
+        # Declaring zero cannot go below it.
+        self.assertEqual(lying.risk.derived, lying.risk.effective)
+
+    def test_a_dangerous_action_declared_safe_is_still_reviewed(self) -> None:
+        """The headline attack: risk_score=0 on an action that must be seen."""
+
+        decision = self.engine.evaluate(
+            ActionRequest(
+                request_id="ducking-review",
+                agent_id=AGENT_ID,
+                action="book_flight",
+                amount=Decimal("18000"),
+                currency="INR",
+                intent_id=INTENT_ID,
+                risk_score=0,
+                attributes={"refundable": False},
+            ),
+            now=self.now,
+        )
+
+        assert decision.risk is not None
+        self.assertEqual(0, decision.risk.declared)
+        self.assertGreaterEqual(decision.risk.derived, 70)
+        self.assertIs(Decision.REVIEW, decision.decision)
+
+        codes = [finding.code for finding in decision.findings]
+        self.assertIn("RISK_SCORE_UNDER_DECLARED", codes)
+        self.assertIn("HUMAN_APPROVAL_REQUIRED", codes)
+
+    def test_repeated_envelope_maxing_escalates_even_at_declared_zero(self) -> None:
+        """Velocity is derived from engine history, not from the agent."""
+
+        engine, now = build_engine(daily_budget="200000")
+        outcomes = []
+        for index in range(6):
+            result = engine.authorize_action(
+                booking(f"velocity-{index}", amount="18000", risk_score=0),
+                now=now,
+            )
+            assert result.decision.risk is not None
+            outcomes.append(
+                (result.decision.decision, result.decision.risk.derived)
+            )
+
+        # Derived risk is non-decreasing as the agent keeps hammering.
+        derived = [score for _, score in outcomes]
+        self.assertEqual(sorted(derived), derived)
+        # And it eventually forces a human to look, despite declared zero.
+        self.assertIn(Decision.REVIEW, [decision for decision, _ in outcomes])
+
+    def test_the_under_declaration_is_recorded_in_the_audit_trail(self) -> None:
+        self.engine.evaluate(
+            ActionRequest(
+                request_id="audited-underdeclaration",
+                agent_id=AGENT_ID,
+                action="book_flight",
+                amount=Decimal("18000"),
+                currency="INR",
+                intent_id=INTENT_ID,
+                risk_score=0,
+                attributes={"refundable": False},
+            ),
+            now=self.now,
+        )
+
+        (evaluated,) = [
+            payload
+            for payload in audit_payloads(self.engine, "policy.evaluated")
+            if payload["request_id"] == "audited-underdeclaration"
+        ]
+        self.assertEqual(0, evaluated["declared_risk"])
+        self.assertGreaterEqual(evaluated["derived_risk"], 70)
+        self.assertEqual(evaluated["derived_risk"], evaluated["effective_risk"])
+        self.assertTrue(evaluated["risk_signals"])
+        self.assertIn("RISK_SCORE_UNDER_DECLARED", evaluated["finding_codes"])
+        self.assertTrue(self.engine.audit_ledger.verify())
+
+    def test_an_in_policy_action_is_not_over_flagged(self) -> None:
+        """The control must not make every ordinary action need a human."""
+
+        decision = self.engine.evaluate(
+            booking("ordinary", amount="3000", risk_score=10), now=self.now
+        )
+        assert decision.risk is not None
+        self.assertLess(decision.risk.effective, 70)
+        self.assertIs(Decision.ALLOW, decision.decision)
 
 
 class AuditChainTamperingTest(unittest.TestCase):

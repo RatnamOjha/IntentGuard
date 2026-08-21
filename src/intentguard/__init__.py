@@ -13,6 +13,7 @@ from .models import (
     HumanApproval,
     IntentPassport,
     ReservationStatus,
+    RiskAssessment,
 )
 from .policy_engine import PolicyEngine
 
@@ -30,4 +31,5 @@ __all__ = [
     "IntentPassport",
     "PolicyEngine",
     "ReservationStatus",
+    "RiskAssessment",
 ]

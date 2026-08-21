@@ -16,6 +16,7 @@ Each control below is held open by a named test in
 | Spending the same headroom twice across a check/execute gap | `authorize_action` holds the funds under the engine lock rather than observing them; `record_execution` re-checks live exposure and refuses. | `BudgetTimeOfCheckTimeOfUseTest` |
 | Concurrent requests each under the cap, summing above it | Budget mutation is serialized on one `RLock`. 20 barrier-released threads, 50 iterations, commit exactly 9,000 against a 10,000 cap every time. | `ConcurrentSpendRaceTest` |
 | Executing work already in flight when the kill switch is pulled | `stop_fleet` bumps a fleet epoch and releases held reservations. Leases carry their issuing epoch, so pre-stop authorizations stay rejected even after the fleet resumes. | `FleetEpochBypassTest` |
+| An agent grading its own risk to skip human approval | The gateway derives risk from the registered intent envelope, live budget exposure, authorization velocity, refundability, and deviation from the authorized attributes. The agent's declared score may only raise the effective score, never lower it, and an under-declaration that would have skipped review is recorded as `RISK_SCORE_UNDER_DECLARED`. | `SelfReportedRiskTest` |
 | Rewriting decision history | SHA-256 hash chain. Payload mutation, field mutation, deletion of a middle event, and reordering are all detected; `first_invalid_link()` names where the chain breaks. | `AuditChainTamperingTest` |
 
 ## What it does not defend against
@@ -42,9 +43,10 @@ Blunt list. None of these are mitigated today.
 - **A connector that ignores the gateway.** IntentGuard is only enforcing where
   the downstream system refuses to act without a valid lease. A payment or
   booking system that accepts a direct call bypasses every control here.
-- **A lying risk score.** `risk_score` arrives on the request. An agent that
-  reports a low score skips the human-approval route entirely. Risk is treated
-  as a trusted input, not something IntentGuard computes.
+- **Risk calibration.** The derived score is a fixed, deterministic weighting
+  (see `PolicyEngine.RISK_WEIGHT_*`). It is not a trained model and has no
+  counterparty reputation, device, or cross-agent context. It bounds what the
+  agent can hide, not what a well-resourced attacker can construct.
 - **Self-asserted agent identity.** `agent_id` is an unverified string. There
   are no agent credentials, so one agent can act as another.
 - **Unsigned intent.** `IntentPassport` is registered over the open API and
@@ -85,7 +87,8 @@ repository can force it to.
 1. The gateway is reachable only by trusted callers on a trusted network.
 2. Connectors refuse to execute without a valid, unexpired lease bound to the
    current fleet epoch.
-3. `risk_score` comes from a trustworthy upstream evaluator.
+3. The derived risk weighting is calibrated for the operator's tolerance. An
+   agent cannot go below it, but the operator chooses where the bar sits.
 4. Agent and operator identity are established somewhere else.
 5. The host clock is monotonic and roughly correct.
 6. One gateway process owns all budget state.

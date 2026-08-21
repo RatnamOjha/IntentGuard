@@ -24,11 +24,25 @@ from .models import (
     IntentPassport,
     PolicyFinding,
     ReservationStatus,
+    RiskAssessment,
 )
 
 
 class PolicyEngine:
     """Evaluates intercepted actions against identity, intent, and risk policy."""
+
+    # Gateway-derived risk weights, capped at 100 in total. Calibrated so that
+    # sitting at the top of a limit the operator granted does not on its own
+    # reach a default review threshold of 70 -- that is what the limit is for --
+    # but doing so repeatedly, or while committing funds the customer never
+    # agreed to make non-refundable, does. See _derive_risk.
+    RISK_WEIGHT_INTENT_UTILIZATION = 35
+    RISK_WEIGHT_BUDGET_EXPOSURE = 25
+    RISK_WEIGHT_VELOCITY = 30
+    RISK_POINTS_PER_PRIOR_AUTHORIZATION = 6
+    RISK_WEIGHT_NON_REFUNDABLE = 20
+    RISK_WEIGHT_UNCONSTRAINED_ATTRIBUTES = 15
+    RISK_POINTS_PER_UNCONSTRAINED_ATTRIBUTE = 5
 
     def __init__(
         self,
@@ -51,6 +65,7 @@ class PolicyEngine:
             lambda: Decimal("0")
         )
         self._reservations: dict[str, BudgetReservation] = {}
+        self._authorization_counts: dict[tuple[str, date], int] = defaultdict(int)
         self._leases: dict[str, AuthorizationLease] = {}
         self._authorizations: dict[
             str, tuple[ActionRequest, AuthorizationResult]
@@ -370,17 +385,47 @@ class PolicyEngine:
                 failure="The action exceeds the agent's remaining daily budget.",
             )
 
+        derived_risk, risk_signals = self._derive_risk(
+            request,
+            agent,
+            intent,
+            exposure=spent_today,
+            evaluation_time=evaluation_time,
+        )
+        risk = RiskAssessment(
+            declared=request.risk_score,
+            derived=derived_risk,
+            signals=risk_signals,
+        )
+
+        # The agent is the untrusted party, so its self-reported score may only
+        # raise the effective risk, never lower it below what the gateway
+        # derived. Escalating your own risk is not an attack; hiding is.
+        if risk.declared < self.review_risk_threshold <= risk.derived:
+            findings.append(
+                PolicyFinding(
+                    code="RISK_SCORE_UNDER_DECLARED",
+                    message=(
+                        f"The agent declared a risk score of {risk.declared}, "
+                        f"but the gateway derived {risk.derived} from "
+                        f"{', '.join(risk.signals)}. The derived score applies."
+                    ),
+                    blocking=False,
+                )
+            )
+
         blocking_findings = [item for item in findings if item.blocking]
         if blocking_findings:
             decision = Decision.DENY
-        elif request.risk_score >= self.review_risk_threshold:
+        elif risk.effective >= self.review_risk_threshold:
             decision = Decision.REVIEW
             findings.append(
                 PolicyFinding(
                     code="HUMAN_APPROVAL_REQUIRED",
                     message=(
-                        "The action requires human approval because its risk "
-                        "score exceeds the configured threshold."
+                        "The action requires human approval because its "
+                        f"effective risk score of {risk.effective} meets the "
+                        "configured threshold."
                     ),
                     blocking=False,
                 )
@@ -401,6 +446,7 @@ class PolicyEngine:
             findings=tuple(findings),
             remaining_daily_budget=remaining_budget,
             policy_version=self.policy_version,
+            risk=risk,
         )
         self.audit_ledger.append(
             "policy.evaluated",
@@ -410,6 +456,10 @@ class PolicyEngine:
                 "decision": decision.value,
                 "finding_codes": [item.code for item in findings],
                 "policy_version": self.policy_version,
+                "declared_risk": risk.declared,
+                "derived_risk": risk.derived,
+                "effective_risk": risk.effective,
+                "risk_signals": list(risk.signals),
             },
         )
         return record
@@ -469,7 +519,11 @@ class PolicyEngine:
                     action=request.action,
                     amount=request.amount,
                     currency=request.currency,
-                    risk_score=request.risk_score,
+                    risk_score=(
+                        decision.risk.effective
+                        if decision.risk is not None
+                        else request.risk_score
+                    ),
                     created_at=evaluation_time,
                 )
                 self._approvals[request.request_id] = approval
@@ -483,7 +537,8 @@ class PolicyEngine:
                         "action": request.action,
                         "amount": request.amount,
                         "currency": request.currency,
-                        "risk_score": request.risk_score,
+                        "risk_score": approval.risk_score,
+                        "declared_risk": request.risk_score,
                     },
                 )
                 return result
@@ -664,6 +719,7 @@ class PolicyEngine:
         )
         key = (request.agent_id, reservation.budget_date)
         self._reserved_spend[key] += request.amount
+        self._authorization_counts[key] += 1
         self._reservations[reservation.reservation_id] = reservation
         self._leases[lease.lease_id] = lease
 
@@ -900,6 +956,85 @@ class PolicyEngine:
                     "currency": request.currency,
                 },
             )
+
+    def _derive_risk(
+        self,
+        request: ActionRequest,
+        agent: AgentProfile | None,
+        intent: IntentPassport | None,
+        *,
+        exposure: Decimal,
+        evaluation_time: datetime,
+    ) -> tuple[int, tuple[str, ...]]:
+        """Score an action from state the requesting agent cannot forge.
+
+        Every input here comes from the operator-registered agent profile, the
+        separately registered customer intent, or the engine's own spend and
+        authorization history. Nothing is taken from the agent's self-reported
+        risk. Weights are deliberately calibrated so that no single dimension at
+        100% reaches ``review_risk_threshold`` on its own: sitting at the top of
+        a limit the operator granted is not by itself suspicious, but doing so
+        repeatedly, or while deviating from the authorized envelope, is.
+        """
+
+        score = 0
+        signals: list[str] = []
+
+        def add(points: int, signal: str) -> None:
+            nonlocal score
+            if points > 0:
+                score += points
+                signals.append(signal)
+
+        if intent is not None and intent.max_amount > 0:
+            ratio = min(request.amount / intent.max_amount, Decimal("1"))
+            add(
+                int(ratio * self.RISK_WEIGHT_INTENT_UTILIZATION),
+                f"intent_utilization={ratio:.2f}",
+            )
+
+        if agent is not None and agent.daily_budget > 0:
+            ratio = min(
+                (exposure + request.amount) / agent.daily_budget, Decimal("1")
+            )
+            add(
+                int(ratio * self.RISK_WEIGHT_BUDGET_EXPOSURE),
+                f"budget_exposure={ratio:.2f}",
+            )
+
+        prior = self._authorization_counts[
+            (request.agent_id, evaluation_time.date())
+        ]
+        add(
+            min(
+                prior * self.RISK_POINTS_PER_PRIOR_AUTHORIZATION,
+                self.RISK_WEIGHT_VELOCITY,
+            ),
+            f"prior_authorizations_today={prior}",
+        )
+
+        # A non-refundable commitment the customer never asked to be refundable
+        # is a real exposure. If the intent required refundable=True, a false
+        # value is already a blocking mismatch and is not double counted here.
+        constrained = intent.required_attributes if intent is not None else {}
+        if request.attributes.get("refundable") is False and (
+            "refundable" not in constrained
+        ):
+            add(self.RISK_WEIGHT_NON_REFUNDABLE, "non_refundable")
+
+        unconstrained = sorted(
+            key for key in request.attributes if key not in constrained
+        )
+        if unconstrained:
+            add(
+                min(
+                    len(unconstrained) * self.RISK_POINTS_PER_UNCONSTRAINED_ATTRIBUTE,
+                    self.RISK_WEIGHT_UNCONSTRAINED_ATTRIBUTES,
+                ),
+                f"unconstrained_attributes={','.join(unconstrained)}",
+            )
+
+        return min(score, 100), tuple(signals)
 
     @staticmethod
     def _check(

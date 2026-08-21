@@ -277,7 +277,11 @@ function toEvent(event: ApiAuditEvent, agentNames: Record<string, string>): Even
       ...base,
       action: readableAction(payload.action),
       decision: "Review",
-      reason: `Risk score ${String(payload.risk_score)}`,
+      reason:
+        payload.declared_risk !== undefined &&
+        payload.declared_risk !== payload.risk_score
+          ? `Effective risk score ${String(payload.risk_score)} (agent declared ${String(payload.declared_risk)})`
+          : `Risk score ${String(payload.risk_score)}`,
     };
   }
   if (event.event_type === "approval.approved") {

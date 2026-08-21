@@ -35,6 +35,8 @@ governance gateway that demonstrate:
 - registered-agent and action-level permissions;
 - intent-bound amount, currency, and contextual constraints;
 - per-action and rolling daily spend limits;
+- gateway-derived risk scoring, where an agent's self-reported score may raise
+  the effective risk but never lower it;
 - an operator approval queue for high-risk actions;
 - individual-agent revocation;
 - an emergency fleet stop;
@@ -43,10 +45,10 @@ governance gateway that demonstrate:
 - hash-chained audit events with integrity verification;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
-Six adversarial tests in [`tests/test_adversarial.py`](tests/test_adversarial.py)
+Seven adversarial suites in [`tests/test_adversarial.py`](tests/test_adversarial.py)
 hold those controls open against deliberate attack: intent tampering, replay
 after revocation, budget time-of-check/time-of-use, a concurrent spend race,
-fleet-epoch bypass, and audit-chain tampering. The limits of what any of it
+fleet-epoch bypass, self-reported risk, and audit-chain tampering. The limits of what any of it
 covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Production architecture and current prototype
@@ -82,7 +84,7 @@ production-roadmap components.
 | Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
 | Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | 27-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
+| Accuracy, latency, and auditability | 29-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
 
 ## Quick start
 
@@ -189,7 +191,7 @@ which is the unedited output of a single benchmark run.
 | Decision latency, p99 | 0.0129 ms |
 | Throughput | 109,562 decisions/second, single-threaded |
 | Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
-| Acceptance suite | 27 of 27 controls passed across 8 categories |
+| Acceptance suite | 29 of 29 controls passed across 9 categories |
 | Audit chain | Verified |
 
 Reproduce with:
@@ -250,7 +252,7 @@ Scope matters here, so read the numbers narrowly:
 │       ├── models.py            # Domain models
 │       └── policy_engine.py     # Runtime policy evaluation
 └── tests/
-    ├── test_adversarial.py      # Six attack classes against the real engine
+    ├── test_adversarial.py      # Seven attack classes against the real engine
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py
