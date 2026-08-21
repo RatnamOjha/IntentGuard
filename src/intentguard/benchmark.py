@@ -566,6 +566,30 @@ def _run_acceptance_suite() -> tuple[list[dict[str, Any]], list[PolicyEngine]]:
         )
     )
 
+    # Deliberately corrupted, so it is built outside `configured()` and kept out
+    # of the fleet-wide audit verification below.
+    truncated, _ = _configured_engine()
+    for index in range(3):
+        truncated.audit_ledger.append("benchmark.probe", {"index": index})
+    truncation_detected = False
+    truncation_observed = "truncated chain still verified"
+    truncated.audit_ledger._events.pop()
+    if not truncated.audit_ledger.verify():
+        truncation_detected = True
+        truncation_observed = (
+            "chain rejected at link "
+            f"{truncated.audit_ledger.first_invalid_link()}"
+        )
+    results.append(
+        _control_case(
+            name="Audit truncation of the newest events is detected",
+            category="audit integrity",
+            passed=truncation_detected,
+            expected="rejected against the separately held head checkpoint",
+            observed=truncation_observed,
+        )
+    )
+
     revoked_lease, revoked_lease_now = configured()
     revoked_authorization = revoked_lease.authorize_action(
         _request("control-revoked-lease"),

@@ -18,6 +18,23 @@ def _json_default(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class LedgerCheckpoint:
+    """The expected length and head of a chain, held outside the chain itself.
+
+    A bare hash chain cannot detect truncation: lopping events off the end
+    leaves a shorter chain that still verifies, and an attacker's own events are
+    always the newest ones. Holding the count and head hash separately closes
+    that, but only to the extent the checkpoint really is separate. Kept in the
+    same process, it stops an attacker who edits the event list; it does not
+    stop one who updates the checkpoint too. A signed, externally stored
+    checkpoint is the fuller answer.
+    """
+
+    event_count: int
+    head_hash: str
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     sequence: int
     occurred_at: datetime
@@ -34,10 +51,19 @@ class AuditLedger:
 
     def __init__(self) -> None:
         self._events: list[AuditEvent] = []
+        self._checkpoint = LedgerCheckpoint(
+            event_count=0, head_hash=self.GENESIS_HASH
+        )
 
     @property
     def events(self) -> tuple[AuditEvent, ...]:
         return tuple(self._events)
+
+    @property
+    def checkpoint(self) -> LedgerCheckpoint:
+        """The expected length and head, tracked outside the event list."""
+
+        return self._checkpoint
 
     def append(self, event_type: str, payload: dict[str, Any]) -> AuditEvent:
         sequence = len(self._events) + 1
@@ -64,19 +90,23 @@ class AuditLedger:
             event_hash=event_hash,
         )
         self._events.append(event)
+        self._checkpoint = LedgerCheckpoint(
+            event_count=len(self._events), head_hash=event_hash
+        )
         return event
 
     def first_invalid_link(self) -> int | None:
         """Return the 1-based position of the first event that breaks the chain.
 
-        Returns ``None`` when the whole chain verifies. The position is the
-        offset in the stored list rather than the ``sequence`` field, because
-        ``sequence`` is itself part of the tampered data: after a deletion the
-        surviving events keep their original sequence numbers, and the position
-        is what identifies where the chain actually breaks.
+        Returns ``None`` when the whole chain verifies against itself and
+        against the checkpoint. The position is the offset in the stored list
+        rather than the ``sequence`` field, because ``sequence`` is itself part
+        of the tampered data: after a deletion the surviving events keep their
+        original sequence numbers, and the position is what identifies where the
+        chain actually breaks.
 
-        This applies exactly the checks :meth:`verify` has always applied. It
-        reports where they first fail; it does not add any.
+        Truncation is reported at the first position that is missing, which is
+        one past the end of what remains.
         """
 
         previous_hash = self.GENESIS_HASH
@@ -97,6 +127,14 @@ class AuditLedger:
             if event.event_hash != expected_hash:
                 return position
             previous_hash = event.event_hash
+
+        # Links so far are internally consistent. The chain cannot tell on its
+        # own that events were removed from the end, so compare against the
+        # separately held checkpoint.
+        if len(self._events) != self._checkpoint.event_count:
+            return min(len(self._events), self._checkpoint.event_count) + 1
+        if previous_hash != self._checkpoint.head_hash:
+            return len(self._events) or 1
         return None
 
     def verify(self) -> bool:

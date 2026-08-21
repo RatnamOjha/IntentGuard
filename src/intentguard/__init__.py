@@ -1,6 +1,6 @@
 """IntentGuard runtime governance primitives."""
 
-from .audit import AuditLedger
+from .audit import AuditLedger, LedgerCheckpoint
 from .models import (
     ActionRequest,
     AgentProfile,
@@ -29,6 +29,7 @@ __all__ = [
     "DecisionRecord",
     "HumanApproval",
     "IntentPassport",
+    "LedgerCheckpoint",
     "PolicyEngine",
     "ReservationStatus",
     "RiskAssessment",

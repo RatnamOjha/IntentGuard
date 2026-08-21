@@ -18,6 +18,7 @@ Each control below is held open by a named test in
 | Executing work already in flight when the kill switch is pulled | `stop_fleet` bumps a fleet epoch and releases held reservations. Leases carry their issuing epoch, so pre-stop authorizations stay rejected even after the fleet resumes. | `FleetEpochBypassTest` |
 | An agent grading its own risk to skip human approval | The gateway derives risk from the registered intent envelope, live budget exposure, authorization velocity, refundability, and deviation from the authorized attributes. The agent's declared score may only raise the effective score, never lower it, and an under-declaration that would have skipped review is recorded as `RISK_SCORE_UNDER_DECLARED`. | `SelfReportedRiskTest` |
 | Rewriting decision history | SHA-256 hash chain. Payload mutation, field mutation, deletion of a middle event, and reordering are all detected; `first_invalid_link()` names where the chain breaks. | `AuditChainTamperingTest` |
+| Deleting the newest events to hide an attack | The expected length and head hash are held in a checkpoint outside the chain, so truncation -- which a bare hash chain cannot see -- is rejected. | `AuditChainTamperingTest` |
 
 ## What it does not defend against
 
@@ -34,12 +35,12 @@ Blunt list. None of these are mitigated today.
 - **A compromised policy store.** State is process memory. Anyone who can write
   to it changes budgets, permissions, or revocation directly, with no integrity
   check between the engine and its own state.
-- **An attacker who can write to the audit ledger.** The hash chain detects
-  edits by someone who does not recompute it. It does not survive an attacker
-  who can rebuild the chain from genesis, and it does not detect truncation of
-  the tail: deleting the newest events still verifies, because nothing signs
-  the head. There is no external checkpoint, no signature, and no append-only
-  storage.
+- **An attacker who can write to both the ledger and its checkpoint.** The
+  hash chain detects edits, and the separately held checkpoint now detects
+  truncation of the newest events. But the checkpoint lives in the same
+  process: an attacker who rebuilds the chain from genesis *and* updates the
+  checkpoint defeats both. Nothing is signed, and storage is not append-only.
+  A signed, externally stored checkpoint is the fuller answer.
 - **A connector that ignores the gateway.** IntentGuard is only enforcing where
   the downstream system refuses to act without a valid lease. A payment or
   booking system that accepts a direct call bypasses every control here.

@@ -74,6 +74,11 @@ export type ApiAuditStatus = {
   verified: boolean;
   event_count: number;
   head_hash: string;
+  /** Tracked outside the chain, so truncation of the newest events is visible. */
+  expected_event_count: number;
+  expected_head_hash: string;
+  /** 1-based position of the first broken link, or null when the chain is intact. */
+  first_invalid_link: number | null;
 };
 
 export type ApiBenchmark = {

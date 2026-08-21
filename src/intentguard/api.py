@@ -539,10 +539,16 @@ def create_app(
     def audit_status() -> dict[str, Any]:
         ledger = governance_engine().audit_ledger
         events = ledger.events
+        checkpoint = ledger.checkpoint
         return {
             "verified": ledger.verify(),
             "event_count": len(events),
             "head_hash": events[-1].event_hash if events else ledger.GENESIS_HASH,
+            # Held outside the chain so truncation of the newest events, which
+            # the chain alone cannot see, is detectable.
+            "expected_event_count": checkpoint.event_count,
+            "expected_head_hash": checkpoint.head_hash,
+            "first_invalid_link": ledger.first_invalid_link(),
         }
 
     @app.post("/v1/demo/bootstrap", tags=["demo"])

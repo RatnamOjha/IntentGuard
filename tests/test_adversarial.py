@@ -772,6 +772,50 @@ class AuditChainTamperingTest(unittest.TestCase):
         self.assertFalse(tampered.verify())
         self.assertEqual(3, tampered.first_invalid_link())
 
+    def test_truncating_the_newest_events_breaks_the_chain(self) -> None:
+        """An attacker's own events are always the newest ones."""
+
+        for removed in (1, 2, self.EVENTS):
+            with self.subTest(removed=removed):
+                tampered = copy.deepcopy(self.ledger)
+                del tampered._events[self.EVENTS - removed :]
+
+                self.assertEqual(self.EVENTS - removed, len(tampered.events))
+                self.assertFalse(
+                    tampered.verify(),
+                    "Truncating the tail left a chain that still verified.",
+                )
+                # The break is reported at the first position that is missing.
+                self.assertEqual(
+                    self.EVENTS - removed + 1, tampered.first_invalid_link()
+                )
+
+    def test_the_checkpoint_survives_a_wholesale_replacement(self) -> None:
+        """Rebuilding a shorter chain from genesis does not restore the head."""
+
+        forged = AuditLedger()
+        for index in (0, 1, 4):
+            forged.append(
+                "action.executed",
+                {"request_id": f"req-{index}", "amount": Decimal("1000")},
+            )
+        # A forged chain is internally consistent; only comparison against a
+        # separately held expectation reveals it.
+        self.assertTrue(forged.verify())
+        self.assertNotEqual(
+            self.ledger.checkpoint.head_hash, forged.checkpoint.head_hash
+        )
+        self.assertNotEqual(
+            self.ledger.checkpoint.event_count, forged.checkpoint.event_count
+        )
+
+    def test_appending_a_forged_event_breaks_the_chain(self) -> None:
+        tampered = copy.deepcopy(self.ledger)
+        tampered._events.append(tampered._events[-1])
+
+        self.assertFalse(tampered.verify())
+        self.assertEqual(self.EVENTS + 1, tampered.first_invalid_link())
+
     def test_a_tampered_engine_ledger_is_detected_through_the_engine(self) -> None:
         engine, now = build_engine()
         engine.authorize_action(booking("req-audited"), now=now)

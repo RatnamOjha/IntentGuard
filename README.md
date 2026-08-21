@@ -42,7 +42,8 @@ governance gateway that demonstrate:
 - an emergency fleet stop;
 - concurrency-safe budget reservations and short-lived execution leases;
 - fleet-epoch invalidation of outstanding authorizations;
-- hash-chained audit events with integrity verification;
+- hash-chained audit events with integrity verification, including a head
+  checkpoint that detects truncation of the newest events;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
 Seven adversarial suites in [`tests/test_adversarial.py`](tests/test_adversarial.py)
@@ -84,7 +85,7 @@ production-roadmap components.
 | Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
 | Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | 29-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
+| Accuracy, latency, and auditability | 30-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
 
 ## Quick start
 
@@ -191,7 +192,7 @@ which is the unedited output of a single benchmark run.
 | Decision latency, p99 | 0.0129 ms |
 | Throughput | 109,562 decisions/second, single-threaded |
 | Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
-| Acceptance suite | 29 of 29 controls passed across 9 categories |
+| Acceptance suite | 30 of 30 controls passed across 10 categories |
 | Audit chain | Verified |
 
 Reproduce with:

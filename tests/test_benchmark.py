@@ -13,11 +13,11 @@ class BenchmarkTest(unittest.TestCase):
     def test_benchmark_is_reproducible_and_safe(self) -> None:
         evidence = run_benchmark(iterations=50)
 
-        self.assertEqual(29, evidence["acceptance"]["total"])
-        self.assertEqual(29, evidence["acceptance"]["passed"])
+        self.assertEqual(30, evidence["acceptance"]["total"])
+        self.assertEqual(30, evidence["acceptance"]["passed"])
         self.assertEqual(0, evidence["acceptance"]["failed"])
         self.assertEqual([], evidence["acceptance"]["failures"])
-        self.assertGreaterEqual(evidence["acceptance"]["category_count"], 9)
+        self.assertGreaterEqual(evidence["acceptance"]["category_count"], 10)
         self.assertEqual(0, evidence["concurrency"]["overspend_violations"])
         self.assertEqual(
             evidence["concurrency"]["budget"],
