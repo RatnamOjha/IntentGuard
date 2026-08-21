@@ -2,10 +2,23 @@ $ErrorActionPreference = "Stop"
 
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 $FrontendDir = Join-Path $ProjectDir "prototype"
-$VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
 
-if (-not (Test-Path $VenvPython)) {
+function Resolve-VenvPython {
+    param([string]$Root)
+    foreach ($Candidate in @("Scripts\python.exe", "bin\python.exe", "bin\python")) {
+        $Path = Join-Path $Root (Join-Path ".venv" $Candidate)
+        if (Test-Path $Path) { return $Path }
+    }
+    return $null
+}
+
+$VenvPython = Resolve-VenvPython $ProjectDir
+if (-not $VenvPython) {
     python -m venv (Join-Path $ProjectDir ".venv")
+    $VenvPython = Resolve-VenvPython $ProjectDir
+}
+if (-not $VenvPython) {
+    throw "Could not find a Python interpreter inside .venv."
 }
 
 & $VenvPython -c "import fastapi, httpx" 2>$null

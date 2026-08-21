@@ -171,12 +171,15 @@ script.
 
 ```text
 .
+├── .github/workflows/ci.yml     # Backend and frontend checks on every push
+├── LICENSE                      # MIT
 ├── docs/
 │   ├── api-contract.md          # REST contract shared with the console
 │   ├── architecture.md
 │   ├── build-plan.md
 │   ├── context.md
-│   └── prototype-readiness.md
+│   ├── prototype-readiness.md
+│   └── repo-metadata.md         # Repository description and topics
 ├── examples/
 │   └── demo.py                  # Four-scenario worked example
 ├── prototype/                   # Operator console (React, Next.js, vinext)
@@ -234,6 +237,10 @@ script.
 - Shadow-mode policy testing
 - Counterfactual and adversarial policy tests
 - Merkle-backed audit checkpoints
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
 
 ## Hackathon alignment
 
