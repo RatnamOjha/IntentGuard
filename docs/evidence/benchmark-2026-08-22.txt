@@ -8,11 +8,12 @@
     "cpu_count": 8
   },
   "acceptance": {
-    "total": 27,
-    "passed": 27,
+    "total": 30,
+    "passed": 30,
     "failed": 0,
-    "category_count": 8,
+    "category_count": 10,
     "categories": [
+      "audit integrity",
       "authenticated intent",
       "budget enforcement",
       "identity and lifecycle",
@@ -20,6 +21,7 @@
       "permission envelope",
       "permitted boundaries",
       "replay protection",
+      "risk integrity",
       "risk routing"
     ],
     "failures": [],
@@ -386,6 +388,36 @@
         "observed": "The execution lease has expired."
       },
       {
+        "name": "Under-declared risk still routes to review",
+        "category": "risk integrity",
+        "passed": true,
+        "expected": {
+          "decision": "review",
+          "finding": "RISK_SCORE_UNDER_DECLARED"
+        },
+        "observed": {
+          "decision": "review",
+          "findings": [
+            "RISK_SCORE_UNDER_DECLARED",
+            "HUMAN_APPROVAL_REQUIRED"
+          ]
+        }
+      },
+      {
+        "name": "Declared risk can raise but never lower the derived score",
+        "category": "risk integrity",
+        "passed": true,
+        "expected": "effective == max(declared, derived) for every declaration",
+        "observed": "monotonic across 0-100"
+      },
+      {
+        "name": "Audit truncation of the newest events is detected",
+        "category": "audit integrity",
+        "passed": true,
+        "expected": "rejected against the separately held head checkpoint",
+        "observed": "chain rejected at link 5"
+      },
+      {
         "name": "Revocation invalidates an outstanding lease",
         "category": "lease safety",
         "passed": true,
@@ -396,15 +428,27 @@
   },
   "engine_latency_ms": {
     "scope": "in_process_policy_engine",
-    "p50": 0.0106,
-    "p95": 0.0116,
-    "p99": 0.0129
+    "p50": 0.0149,
+    "p95": 0.0174,
+    "p99": 0.0192
+  },
+  "http_round_trip_ms": {
+    "scope": "http_round_trip_authorize",
+    "measured": true,
+    "requests": 500,
+    "concurrency": 16,
+    "elapsed_seconds": 0.231462,
+    "requests_per_second": 2160.2,
+    "p50": 6.866,
+    "p95": 9.0543,
+    "p99": 11.242,
+    "max": 12.8164
   },
   "engine_throughput": {
     "scope": "in_process_policy_engine_single_thread",
     "iterations": 1000,
-    "elapsed_seconds": 0.009127,
-    "decisions_per_second": 109561.5
+    "elapsed_seconds": 0.013916,
+    "decisions_per_second": 71859.1
   },
   "concurrency": {
     "requests": 20,

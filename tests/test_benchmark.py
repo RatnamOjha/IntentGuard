@@ -6,7 +6,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from intentguard.benchmark import run_benchmark  # noqa: E402
+from intentguard.benchmark import (  # noqa: E402
+    measure_http_round_trip,
+    run_benchmark,
+)
+
+try:
+    import httpx  # noqa: F401
+    import uvicorn  # noqa: F401
+
+    HTTP_EXTRAS = True
+except ImportError:  # Allows domain-only runs before extras are installed.
+    HTTP_EXTRAS = False
 
 
 class BenchmarkTest(unittest.TestCase):
@@ -42,6 +53,9 @@ class BenchmarkTest(unittest.TestCase):
         self.assertGreater(throughput["elapsed_seconds"], 0)
         self.assertGreater(throughput["decisions_per_second"], 0)
 
+        # A benchmark run inside a server must not start another server.
+        self.assertFalse(evidence["http_round_trip_ms"]["measured"])
+
         environment = evidence["environment"]
         for key in (
             "python_version",
@@ -51,6 +65,26 @@ class BenchmarkTest(unittest.TestCase):
             "cpu_count",
         ):
             self.assertIn(key, environment)
+
+
+@unittest.skipUnless(HTTP_EXTRAS, "Install the api and dev extras for HTTP timing")
+class HttpRoundTripBenchmarkTest(unittest.TestCase):
+    def test_measures_real_http_latency_under_concurrency(self) -> None:
+        measured = measure_http_round_trip(
+            requests=24, concurrency=4, warmup=4
+        )
+
+        self.assertTrue(measured["measured"])
+        self.assertEqual("http_round_trip_authorize", measured["scope"])
+        self.assertEqual(24, measured["requests"])
+        self.assertEqual(4, measured["concurrency"])
+        self.assertGreater(measured["requests_per_second"], 0)
+        # Ordering must hold, and a real round trip is far slower than the
+        # in-process engine, so the two figures cannot be confused.
+        self.assertLessEqual(measured["p50"], measured["p95"])
+        self.assertLessEqual(measured["p95"], measured["p99"])
+        self.assertLessEqual(measured["p99"], measured["max"])
+        self.assertGreater(measured["p50"], 0)
 
 
 if __name__ == "__main__":

@@ -85,7 +85,7 @@ production-roadmap components.
 | Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
 | Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | 30-control acceptance suite, separate engine/API latency measurements, concurrency tests, and a hash-chained audit trail |
+| Accuracy, latency, and auditability | 30-control acceptance suite, measured HTTP round-trip and in-process engine latency, concurrency tests, and a hash-chained audit trail with a truncation-detecting head checkpoint |
 
 ## Quick start
 
@@ -182,18 +182,42 @@ script.
 ## Measured performance
 
 Every figure below is copied from
-[`docs/evidence/benchmark-2026-08-21.txt`](docs/evidence/benchmark-2026-08-21.txt),
-which is the unedited output of a single benchmark run.
+[`docs/evidence/benchmark-2026-08-22.txt`](docs/evidence/benchmark-2026-08-22.txt),
+the unedited output of a single benchmark run.
+
+### End-to-end HTTP, under concurrent load
+
+This is what a caller actually experiences: TCP, HTTP parsing, request
+validation, the full authorization path, and JSON serialization, measured
+against a real Uvicorn server at 16 concurrent clients.
 
 | Metric | Value |
 | --- | --- |
-| Decision latency, p50 | 0.0106 ms |
-| Decision latency, p95 | 0.0116 ms |
-| Decision latency, p99 | 0.0129 ms |
-| Throughput | 109,562 decisions/second, single-threaded |
+| Authorization latency, p50 | 6.87 ms |
+| Authorization latency, p95 | 9.05 ms |
+| Authorization latency, p99 | 11.24 ms |
+| Slowest request | 12.82 ms |
+| Throughput | 2,160 requests/second at concurrency 16 |
+
+### Policy engine, in process
+
+The engine on its own, with no transport. Useful for showing that policy
+evaluation is not the bottleneck; **not** a figure to quote as system latency.
+
+| Metric | Value |
+| --- | --- |
+| Decision latency, p50 | 0.0149 ms |
+| Decision latency, p95 | 0.0174 ms |
+| Decision latency, p99 | 0.0192 ms |
+| Throughput | 71,859 decisions/second, single-threaded |
+
+### Correctness under load
+
+| Metric | Value |
+| --- | --- |
 | Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
 | Acceptance suite | 30 of 30 controls passed across 10 categories |
-| Audit chain | Verified |
+| Audit chain | Verified, including the head checkpoint |
 
 Reproduce with:
 
@@ -205,14 +229,17 @@ Hardware and runtime for the committed run: Apple M3 (8 cores, 4 performance
 and 4 efficiency), 16 GB RAM, macOS 26.2, CPython 3.12.2. The benchmark records
 its own environment block, so a re-run on different hardware is self-labelling.
 
-Scope matters here, so read the numbers narrowly:
+Caveats worth reading before quoting any of this:
 
-- Latency and throughput measure `PolicyEngine.evaluate` in process. They are
-  not HTTP round-trip numbers and do not include FastAPI, serialization, or
-  network time.
-- The operator console measures browser-to-FastAPI p50/p95/p99 separately at
-  runtime through `/v1/demo/benchmark/authorize-probe`. That figure depends on
-  the browser and host, so no value for it is committed here.
+- The two latency tables are three orders of magnitude apart because they
+  measure different things. Concurrency of 16 on 8 cores means requests queue,
+  which is why per-request latency is higher than the single-threaded engine
+  figure while throughput stays flat.
+- The HTTP measurement runs against isolated probe state on loopback. A real
+  deployment adds network, TLS, and authentication that this does not have.
+- p99 degrades over longer runs: at 2,000 requests it roughly doubles, because
+  held reservations accumulate and are scanned on each authorization. Nothing
+  evicts them until they expire.
 - All state is in memory. These numbers say nothing about a durable store.
 
 ## Project structure

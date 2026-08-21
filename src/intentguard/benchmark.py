@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from statistics import median
-from time import perf_counter, perf_counter_ns
+from time import perf_counter, perf_counter_ns, sleep
 from typing import Any
 
 from .models import ActionRequest, AgentProfile, Decision, IntentPassport
@@ -620,7 +621,113 @@ def _run_acceptance_suite() -> tuple[list[dict[str, Any]], list[PolicyEngine]]:
     return results, engines
 
 
-def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
+def measure_http_round_trip(
+    *,
+    requests: int = 500,
+    concurrency: int = 16,
+    warmup: int = 25,
+) -> dict[str, Any]:
+    """Measure end-to-end HTTP latency against a real Uvicorn server.
+
+    This is the number a caller actually experiences: TCP, HTTP parsing,
+    Pydantic validation, the full authorization path, and JSON serialization,
+    under concurrent load. It is not comparable to the in-process engine
+    figures, which exclude all of that.
+
+    Requests go to /v1/demo/benchmark/authorize-probe, which runs the complete
+    FastAPI authorization path against isolated state so the measurement cannot
+    disturb demo or operator data.
+    """
+
+    try:
+        import httpx
+        import uvicorn
+    except ImportError:
+        return {
+            "scope": "http_round_trip_authorize",
+            "measured": False,
+            "reason": "Install the api and dev extras to measure HTTP latency.",
+        }
+
+    # Imported here: intentguard.api imports this module, so a module-level
+    # import would be circular.
+    from .api import create_app
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(),
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            access_log=False,
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    deadline = perf_counter() + 30
+    while not server.started and perf_counter() < deadline:
+        sleep(0.01)
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=10)
+        raise RuntimeError("The benchmark server did not start within 30s.")
+
+    try:
+        port = server.servers[0].sockets[0].getsockname()[1]
+        url = f"http://127.0.0.1:{port}/v1/demo/benchmark/authorize-probe"
+
+        def probe_batch(labels: list[str]) -> list[float]:
+            samples: list[float] = []
+            with httpx.Client(timeout=30.0) as client:
+                for label in labels:
+                    started = perf_counter_ns()
+                    response = client.post(url, json={"request_id": label})
+                    samples.append((perf_counter_ns() - started) / 1_000_000)
+                    response.raise_for_status()
+                    if response.json()["decision"] != "allow":
+                        raise RuntimeError(
+                            "The HTTP probe did not receive an allow decision."
+                        )
+            return samples
+
+        probe_batch([f"warmup-{index}" for index in range(warmup)])
+
+        # Round-robin so every worker stays busy for the whole window.
+        batches: list[list[str]] = [[] for _ in range(concurrency)]
+        for index in range(requests):
+            batches[index % concurrency].append(f"measured-{index}")
+
+        started_at = perf_counter()
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            collected = list(executor.map(probe_batch, batches))
+        elapsed = perf_counter() - started_at
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+    samples = [sample for batch in collected for sample in batch]
+    return {
+        "scope": "http_round_trip_authorize",
+        "measured": True,
+        "requests": len(samples),
+        "concurrency": concurrency,
+        "elapsed_seconds": round(elapsed, 6),
+        "requests_per_second": round(len(samples) / elapsed, 1),
+        "p50": round(median(samples), 4),
+        "p95": round(_percentile(samples, 0.95), 4),
+        "p99": round(_percentile(samples, 0.99), 4),
+        "max": round(max(samples), 4),
+    }
+
+
+def run_benchmark(
+    iterations: int = 1000,
+    *,
+    include_http: bool = False,
+    http_requests: int = 500,
+    http_concurrency: int = 16,
+) -> dict[str, Any]:
     """Run acceptance controls plus engine, race, and audit measurements."""
 
     acceptance_results, acceptance_engines = _run_acceptance_suite()
@@ -695,6 +802,19 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
             "p95": round(_percentile(engine_latency_ms, 0.95), 4),
             "p99": round(_percentile(engine_latency_ms, 0.99), 4),
         },
+        "http_round_trip_ms": (
+            measure_http_round_trip(
+                requests=http_requests, concurrency=http_concurrency
+            )
+            if include_http
+            # The /v1/demo/benchmark endpoint calls this from inside a running
+            # server; it must not start another one to answer a request.
+            else {
+                "scope": "http_round_trip_authorize",
+                "measured": False,
+                "reason": "Run intentguard.benchmark as a script to measure HTTP latency.",
+            }
+        ),
         "engine_throughput": {
             "scope": "in_process_policy_engine_single_thread",
             "iterations": iterations,
@@ -723,7 +843,7 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
 def main() -> None:
     import json
 
-    print(json.dumps(run_benchmark(), indent=2))
+    print(json.dumps(run_benchmark(include_http=True), indent=2))
 
 
 if __name__ == "__main__":
