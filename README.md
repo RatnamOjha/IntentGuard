@@ -6,9 +6,11 @@ IntentGuard is a real-time control plane that evaluates every action proposed by
 an autonomous financial agent before that action reaches a payment, servicing,
 travel, or claims system.
 
-It combines agent identity, authenticated customer intent, policy-as-code,
-dynamic spend limits, risk-based human approval, instant revocation, a fleet
-kill switch, and a tamper-evident audit trail.
+It combines registered agent identity, registered customer intent, versioned
+agent policy, dynamic spend limits, risk-based human approval, instant
+revocation, a fleet kill switch, and a hash-chained audit trail. Intent
+passports are not signed and agent identity is self-asserted; see
+[`docs/threat-model.md`](docs/threat-model.md).
 
 ## Why this matters
 
@@ -36,9 +38,9 @@ governance gateway that demonstrate:
 - an operator approval queue for high-risk actions;
 - individual-agent revocation;
 - an emergency fleet stop;
-- hash-chained audit events with integrity verification.
 - concurrency-safe budget reservations and short-lived execution leases;
 - fleet-epoch invalidation of outstanding authorizations;
+- hash-chained audit events with integrity verification;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
 Six adversarial tests in [`tests/test_adversarial.py`](tests/test_adversarial.py)
@@ -266,14 +268,19 @@ Scope matters here, so read the numbers narrowly:
 
 ### Prototype
 
+Running on `main`:
+
 - FastAPI governance gateway
 - React and TypeScript operator console
+- Three seeded agents: travel, servicing, and benefits
+- Human approval queue
+- Live fleet status, audit review, and JSON evidence export in the console
+
+Still outstanding:
+
 - OPA/Rego policy configuration and simulation
 - PostgreSQL durable state
 - Redis runtime budgets and revocation state
-- Three mocked agents: travel, servicing, and benefits
-- Human approval queue
-- Real-time fleet monitoring and audit replay
 
 ### Advanced differentiators
 
