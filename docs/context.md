@@ -21,7 +21,7 @@ first-round submission.
 - Idempotent action authorization
 - Fleet-epoch invalidation of outstanding execution leases
 - Domain, concurrency, regression, and API tests
-- Vinext operator dashboard under `prototype/` on `main`
+- `vinext` operator dashboard under `prototype/` on `main`
 - Live versioned permission and budget editor
 - Protected-connector stale-lease rejection demonstration
 - Reproducible acceptance, engine/API latency, concurrency, and audit benchmark
@@ -83,7 +83,7 @@ lifecycle so the policy check and budget hold are atomic.
 | Area | Owner | Branch | Status |
 |---|---|---|---|
 | FastAPI gateway | Backend owner | api-gateway | Ready for integration |
-| Vinext dashboard | Frontend owner | main (`prototype/`) | Implemented |
+| `vinext` dashboard | Frontend owner | main (`prototype/`) | Implemented |
 
 ## Running the project
 
@@ -115,7 +115,7 @@ on ports 3000 and 5173 for both `localhost` and `127.0.0.1`.
 
 ### 2026-07-27
 
-- Added configurable CORS origins and the Vinext port 3000 defaults.
+- Added configurable CORS origins and the operator-console port 3000 defaults.
 - Added agent restoration with an API endpoint, audit event, and tests.
 - Updated shared context for the dashboard now present under `prototype/`.
 - Added the FastAPI governance gateway and frontend-safe CORS configuration.

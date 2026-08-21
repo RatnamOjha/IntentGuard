@@ -50,7 +50,7 @@ the prototype does not overstate its implementation.
 
 | Layer | Selected technology | Responsibility |
 | --- | --- | --- |
-| Operator UI | React, TypeScript, Vite | Policies, budgets, fleet controls, activity, and audit review |
+| Operator UI | React 19, TypeScript, Next.js 16 on Vite | Policies, budgets, fleet controls, activity, and audit review |
 | Governance API | FastAPI, Python | Enforcement gateway and operator APIs |
 | Policy decisions | Open Policy Agent, Rego | Granular permission and contextual policy evaluation |
 | Durable state | PostgreSQL | Agents, policies, budgets, approvals, and audit metadata |
@@ -60,9 +60,11 @@ the prototype does not overstate its implementation.
 | Local runtime | Docker Compose | Reproducible end-to-end prototype |
 | Deployment path | AWS | ECS/Fargate, RDS, ElastiCache, and managed secrets |
 
-The current executable prototype uses React/Vinext, FastAPI, the deterministic
-Python policy engine, and in-memory state. OPA, PostgreSQL, Redis, Prometheus,
-Splunk, Docker Compose, and AWS are explicit production-roadmap components.
+The current executable prototype uses React and Next.js built and served by
+`vinext` (a Vite-based drop-in replacement for the Next.js CLI), FastAPI, the
+deterministic Python policy engine, and in-memory state. OPA, PostgreSQL,
+Redis, Prometheus, Splunk, Docker Compose, and AWS are explicit
+production-roadmap components.
 
 ## Challenge task coverage
 
@@ -76,14 +78,15 @@ Splunk, Docker Compose, and AWS are explicit production-roadmap components.
 
 ## Quick start
 
-Requires Python 3.9 or newer, Node.js 22.13 or newer, and pnpm. Start the full
-demo with one command:
+Requires Python 3.10 or newer (the pinned FastAPI, Starlette, and Uvicorn
+releases require it), Node.js 22.13 or newer, and pnpm. Start the full demo
+with one command:
 
 ```bash
 ./scripts/start-demo.sh
 ```
 
-Open the local URL printed by Vinext, normally `http://localhost:3000`. It
+Open the local URL printed by `vinext`, normally `http://localhost:3000`. It
 connects to the API at `http://127.0.0.1:8000` and initializes a deterministic
 three-agent sandbox.
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
@@ -109,24 +112,27 @@ audit evidence with:
 PYTHONPATH=src .venv/bin/python -m intentguard.benchmark
 ```
 
-On Windows PowerShell, start the API with:
+To start the API on its own from Windows PowerShell, resolve the interpreter
+first so the commands work whichever layout `venv` produced:
 
 ```powershell
 python -m venv .venv
-# This laptop's MSYS Python creates .venv/bin rather than .venv/Scripts.
-& .\.venv\bin\python.exe -m pip install -e ".[api,dev]"
-& .\.venv\bin\python.exe -m unittest discover -s tests -v
-& .\.venv\bin\python.exe -m uvicorn intentguard.api:app --reload
+$Python = @('.venv\Scripts\python.exe', '.venv\bin\python.exe') |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+& $Python -m pip install -e ".[api,dev]"
+& $Python -m unittest discover -s tests -v
+& $Python -m uvicorn intentguard.api:app --reload
 ```
 
 Then open `http://127.0.0.1:8000/docs`. The shared frontend contract is in
 [`docs/api-contract.md`](docs/api-contract.md).
 
-With the standard Windows Python distribution, replace `.venv\bin` with
-`.venv\Scripts` in these commands.
-
-The API accepts the Vinext dashboard origins on ports 3000, 3001, and 5173 by
+The API accepts the operator-console origins on ports 3000, 3001, and 5173 by
 default. For deployed environments, set a comma-separated allowlist:
+
+```bash
+export INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
+```
 
 ```powershell
 $env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
@@ -139,29 +145,64 @@ Submission resources:
 
 ## Demo scenarios
 
-The example evaluates four actions:
+Run the worked example against the in-process engine:
 
-1. A compliant refundable flight booking is allowed.
-2. An over-budget booking is denied.
-3. A high-risk request is routed to human review.
-4. A pre-stop execution lease is rejected by the protected connector after the
-   fleet epoch changes.
-5. A live policy edit changes an agent's next decision.
+```bash
+PYTHONPATH=src .venv/bin/python examples/demo.py
+```
+
+[`examples/demo.py`](examples/demo.py) registers one travel agent and one
+customer intent, then evaluates four actions:
+
+1. A compliant refundable INR 16,000 booking is allowed and recorded as spend.
+2. An INR 31,000 booking is denied for breaching the agent's per-action limit,
+   the customer's authorized maximum, and the remaining daily budget.
+3. A booking with a risk score of 82 is routed to human review.
+4. After the operator triggers the fleet emergency stop, a further booking is
+   denied.
+
+The script then prints whether the hash-chained audit ledger still verifies.
+
+Lease revocation, protected-connector rejection, and live policy edits are
+exercised by the test suite and the operator console rather than by this
+script.
 
 ## Project structure
 
 ```text
 .
 ├── docs/
-│   └── architecture.md
+│   ├── api-contract.md          # REST contract shared with the console
+│   ├── architecture.md
+│   ├── build-plan.md
+│   ├── context.md
+│   └── prototype-readiness.md
 ├── examples/
-│   └── demo.py
+│   └── demo.py                  # Four-scenario worked example
+├── prototype/                   # Operator console (React, Next.js, vinext)
+│   ├── app/                     # layout.tsx, page.tsx, globals.css
+│   ├── build/                   # sites-vite-plugin.ts
+│   ├── db/                      # Drizzle schema and client
+│   ├── lib/intentguard-api.ts   # Typed client for the governance API
+│   ├── public/
+│   ├── tests/rendered-html.test.mjs
+│   ├── worker/index.ts          # Cloudflare worker entry point
+│   └── vite.config.ts
+├── scripts/
+│   ├── start-demo.sh            # and start-demo.ps1
+│   └── test-all.sh              # and test-all.ps1
 ├── src/
 │   └── intentguard/
-│       ├── audit.py
-│       ├── models.py
-│       └── policy_engine.py
+│       ├── __init__.py          # Public package surface
+│       ├── api.py               # FastAPI governance gateway
+│       ├── audit.py             # Hash-chained audit ledger
+│       ├── benchmark.py         # Acceptance, latency, and race evidence
+│       ├── models.py            # Domain models
+│       └── policy_engine.py     # Runtime policy evaluation
 └── tests/
+    ├── test_api.py
+    ├── test_authorization_flow.py
+    ├── test_benchmark.py
     └── test_policy_engine.py
 ```
 

@@ -108,7 +108,7 @@ can display their structured findings.
 
 ## Browser origins
 
-The gateway allows the Vinext dashboard on ports `3000` and `3001` for both
+The gateway allows the operator console on ports `3000` and `3001` for both
 `localhost` and `127.0.0.1` by default. Vite origins on port 5173 remain
 supported. Override the complete allowlist with a comma-separated environment
 variable:

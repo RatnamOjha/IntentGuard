@@ -58,5 +58,6 @@ pnpm run lint
 pnpm test
 ```
 
-The production build uses Vinext and the included Cloudflare worker
+The production build runs through `vinext`, the Vite-based drop-in
+replacement for the Next.js CLI, together with the included Cloudflare worker
 configuration.
