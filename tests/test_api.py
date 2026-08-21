@@ -149,7 +149,7 @@ class ApiTest(unittest.TestCase):
         approved = self.client.post(
             "/v1/approvals/request-review/approve",
             json={
-                "reviewer": "Ratnam Ojha",
+                "reviewer": "Demo Operator",
                 "reason": "Verified with the card member",
             },
         )
@@ -175,7 +175,7 @@ class ApiTest(unittest.TestCase):
         rejected = self.client.post(
             "/v1/approvals/request-rejected/reject",
             json={
-                "reviewer": "Ratnam Ojha",
+                "reviewer": "Demo Operator",
                 "reason": "Card member denied the request",
             },
         )
@@ -209,7 +209,7 @@ class ApiTest(unittest.TestCase):
                 "max_action_amount": "25000",
                 "daily_budget": "40000",
                 "active": True,
-                "operator": "Ratnam Ojha",
+                "operator": "Demo Operator",
                 "reason": "Expand the travel pilot",
             },
         )

@@ -17,6 +17,7 @@ PYTHONPATH="$PROJECT_DIR/src" "$VENV_PYTHON" \
   -m unittest discover -s "$PROJECT_DIR/tests" -v
 
 cd "$FRONTEND_DIR"
+./node_modules/.bin/tsc --noEmit
 ./node_modules/.bin/vinext build
 node --test tests/rendered-html.test.mjs
 ./node_modules/.bin/eslint app lib tests

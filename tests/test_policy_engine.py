@@ -166,7 +166,7 @@ class PolicyEngineTest(unittest.TestCase):
             max_action_amount=Decimal("25000"),
             daily_budget=Decimal("40000"),
             active=True,
-            operator="Ratnam Ojha",
+            operator="Demo Operator",
             reason="Expand the travel pilot",
         )
 
@@ -189,7 +189,7 @@ class PolicyEngineTest(unittest.TestCase):
                 max_action_amount=Decimal("20000"),
                 daily_budget=Decimal("10000"),
                 active=True,
-                operator="Ratnam Ojha",
+                operator="Demo Operator",
                 reason="Invalid reduction",
                 now=self.now,
             )

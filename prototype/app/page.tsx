@@ -353,6 +353,9 @@ export default function Home() {
     verified: false,
     event_count: 0,
     head_hash: "",
+    expected_event_count: 0,
+    expected_head_hash: "",
+    first_invalid_link: null,
   });
   const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("booking");
   const [lastResult, setLastResult] = useState<Result | null>(null);
@@ -822,9 +825,9 @@ export default function Home() {
             </div>
           </div>
           <div className="operator">
-            <span className="avatar">RO</span>
+            <span className="avatar">DO</span>
             <div>
-              <strong>Ratnam Ojha</strong>
+              <strong>Demo Operator</strong>
               <small>Fleet operator</small>
             </div>
             <span className="more">•••</span>

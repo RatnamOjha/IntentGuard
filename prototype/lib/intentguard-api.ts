@@ -279,7 +279,7 @@ export function updateAgentPolicy(
       method: "PUT",
       body: JSON.stringify({
         ...policy,
-        operator: "Ratnam Ojha",
+        operator: "Demo Operator",
         reason: "Policy published from the IntentGuard operator console",
       }),
     },
@@ -301,7 +301,7 @@ export function resolveApproval(requestId: string, approved: boolean) {
     {
       method: "POST",
       body: JSON.stringify({
-        reviewer: "Ratnam Ojha",
+        reviewer: "Demo Operator",
         reason: approved
           ? "Card-member intent and transaction context verified"
           : "Risk could not be resolved by the operator",

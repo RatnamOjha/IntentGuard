@@ -31,6 +31,7 @@ $env:PYTHONPATH = Join-Path $ProjectDir "src"
 
 Push-Location $FrontendDir
 try {
+    & ".\node_modules\.bin\tsc.cmd" --noEmit
     & ".\node_modules\.bin\vinext.cmd" build
     node --test tests/rendered-html.test.mjs
     & ".\node_modules\.bin\eslint.cmd" app lib tests
