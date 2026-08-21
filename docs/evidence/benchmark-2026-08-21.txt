@@ -398,13 +398,13 @@
     "scope": "in_process_policy_engine",
     "p50": 0.0106,
     "p95": 0.0116,
-    "p99": 0.014
+    "p99": 0.0129
   },
   "engine_throughput": {
     "scope": "in_process_policy_engine_single_thread",
     "iterations": 1000,
-    "elapsed_seconds": 0.009172,
-    "decisions_per_second": 109031.4
+    "elapsed_seconds": 0.009127,
+    "decisions_per_second": 109561.5
   },
   "concurrency": {
     "requests": 20,

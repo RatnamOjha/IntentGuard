@@ -184,8 +184,8 @@ which is the unedited output of a single benchmark run.
 | --- | --- |
 | Decision latency, p50 | 0.0106 ms |
 | Decision latency, p95 | 0.0116 ms |
-| Decision latency, p99 | 0.0140 ms |
-| Throughput | 109,031 decisions/second, single-threaded |
+| Decision latency, p99 | 0.0129 ms |
+| Throughput | 109,562 decisions/second, single-threaded |
 | Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
 | Acceptance suite | 27 of 27 controls passed across 8 categories |
 | Audit chain | Verified |
