@@ -1,0 +1,417 @@
+{
+  "iterations": 1000,
+  "environment": {
+    "python_version": "3.12.2",
+    "python_implementation": "CPython",
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu_count": 8
+  },
+  "acceptance": {
+    "total": 27,
+    "passed": 27,
+    "failed": 0,
+    "category_count": 8,
+    "categories": [
+      "authenticated intent",
+      "budget enforcement",
+      "identity and lifecycle",
+      "lease safety",
+      "permission envelope",
+      "permitted boundaries",
+      "replay protection",
+      "risk routing"
+    ],
+    "failures": [],
+    "results": [
+      {
+        "name": "Compliant request is allowed",
+        "category": "permitted boundaries",
+        "passed": true,
+        "expected": {
+          "decision": "allow",
+          "finding": "POLICY_SATISFIED"
+        },
+        "observed": {
+          "decision": "allow",
+          "findings": [
+            "POLICY_SATISFIED"
+          ]
+        }
+      },
+      {
+        "name": "Exact customer amount boundary is allowed",
+        "category": "permitted boundaries",
+        "passed": true,
+        "expected": {
+          "decision": "allow",
+          "finding": "POLICY_SATISFIED"
+        },
+        "observed": {
+          "decision": "allow",
+          "findings": [
+            "POLICY_SATISFIED"
+          ]
+        }
+      },
+      {
+        "name": "Additional non-conflicting context is allowed",
+        "category": "permitted boundaries",
+        "passed": true,
+        "expected": {
+          "decision": "allow",
+          "finding": "POLICY_SATISFIED"
+        },
+        "observed": {
+          "decision": "allow",
+          "findings": [
+            "POLICY_SATISFIED"
+          ]
+        }
+      },
+      {
+        "name": "Risk immediately below threshold is allowed",
+        "category": "risk routing",
+        "passed": true,
+        "expected": {
+          "decision": "allow",
+          "finding": "POLICY_SATISFIED"
+        },
+        "observed": {
+          "decision": "allow",
+          "findings": [
+            "POLICY_SATISFIED"
+          ]
+        }
+      },
+      {
+        "name": "Risk threshold routes to review",
+        "category": "risk routing",
+        "passed": true,
+        "expected": {
+          "decision": "review",
+          "finding": "HUMAN_APPROVAL_REQUIRED"
+        },
+        "observed": {
+          "decision": "review",
+          "findings": [
+            "HUMAN_APPROVAL_REQUIRED"
+          ]
+        }
+      },
+      {
+        "name": "Maximum risk routes to review",
+        "category": "risk routing",
+        "passed": true,
+        "expected": {
+          "decision": "review",
+          "finding": "HUMAN_APPROVAL_REQUIRED"
+        },
+        "observed": {
+          "decision": "review",
+          "findings": [
+            "HUMAN_APPROVAL_REQUIRED"
+          ]
+        }
+      },
+      {
+        "name": "Customer intent amount breach is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_AMOUNT_EXCEEDED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_AMOUNT_EXCEEDED"
+          ]
+        }
+      },
+      {
+        "name": "Agent action limit breach is denied",
+        "category": "permission envelope",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "AGENT_ACTION_LIMIT"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "AGENT_ACTION_LIMIT",
+            "INTENT_AMOUNT_EXCEEDED"
+          ]
+        }
+      },
+      {
+        "name": "Unpermitted action is denied",
+        "category": "permission envelope",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "ACTION_NOT_PERMITTED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "ACTION_NOT_PERMITTED",
+            "INTENT_ACTION_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Wrong currency is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_CURRENCY_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_CURRENCY_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Conflicting required attribute is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_ATTRIBUTE_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_ATTRIBUTE_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Missing required attribute is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_ATTRIBUTE_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_ATTRIBUTE_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Unknown intent is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_UNKNOWN"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_UNKNOWN"
+          ]
+        }
+      },
+      {
+        "name": "Unknown agent is denied",
+        "category": "identity and lifecycle",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "AGENT_UNKNOWN"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "AGENT_UNKNOWN",
+            "INTENT_AGENT_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Intent action mismatch is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_ACTION_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_ACTION_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Intent assigned to another agent is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_AGENT_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_AGENT_MISMATCH"
+          ]
+        }
+      },
+      {
+        "name": "Expired intent is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_EXPIRED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_EXPIRED"
+          ]
+        }
+      },
+      {
+        "name": "Inactive agent is denied",
+        "category": "identity and lifecycle",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "AGENT_INACTIVE"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "AGENT_INACTIVE"
+          ]
+        }
+      },
+      {
+        "name": "Revoked agent is denied",
+        "category": "identity and lifecycle",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "AGENT_REVOKED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "AGENT_REVOKED"
+          ]
+        }
+      },
+      {
+        "name": "Fleet emergency stop fails closed",
+        "category": "identity and lifecycle",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "FLEET_STOPPED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "FLEET_STOPPED"
+          ]
+        }
+      },
+      {
+        "name": "Daily budget breach is denied",
+        "category": "budget enforcement",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "DAILY_BUDGET_EXCEEDED"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "DAILY_BUDGET_EXCEEDED"
+          ]
+        }
+      },
+      {
+        "name": "Exact remaining budget is allowed",
+        "category": "budget enforcement",
+        "passed": true,
+        "expected": {
+          "decision": "allow",
+          "finding": "POLICY_SATISFIED"
+        },
+        "observed": {
+          "decision": "allow",
+          "findings": [
+            "POLICY_SATISFIED"
+          ]
+        }
+      },
+      {
+        "name": "Identical request replay is idempotent",
+        "category": "replay protection",
+        "passed": true,
+        "expected": "same lease and reservation",
+        "observed": "same lease and reservation"
+      },
+      {
+        "name": "Conflicting request-ID replay is rejected",
+        "category": "replay protection",
+        "passed": true,
+        "expected": "rejected as conflicting replay",
+        "observed": "The request ID was already used with different action data."
+      },
+      {
+        "name": "Pre-stop execution lease is rejected",
+        "category": "lease safety",
+        "passed": true,
+        "expected": "rejected after fleet epoch change",
+        "observed": "The execution lease was invalidated by a fleet stop."
+      },
+      {
+        "name": "Expired execution lease is rejected",
+        "category": "lease safety",
+        "passed": true,
+        "expected": "rejected after lease expiry",
+        "observed": "The execution lease has expired."
+      },
+      {
+        "name": "Revocation invalidates an outstanding lease",
+        "category": "lease safety",
+        "passed": true,
+        "expected": "rejected after agent revocation",
+        "observed": "The execution lease belongs to a revoked agent."
+      }
+    ]
+  },
+  "engine_latency_ms": {
+    "scope": "in_process_policy_engine",
+    "p50": 0.0106,
+    "p95": 0.0116,
+    "p99": 0.014
+  },
+  "engine_throughput": {
+    "scope": "in_process_policy_engine_single_thread",
+    "iterations": 1000,
+    "elapsed_seconds": 0.009172,
+    "decisions_per_second": 109031.4
+  },
+  "concurrency": {
+    "requests": 20,
+    "allowed": 5,
+    "budget": "10000",
+    "reserved_total": "10000",
+    "overspend_violations": 0
+  },
+  "audit_chain_verified": true
+}

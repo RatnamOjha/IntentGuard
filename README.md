@@ -167,6 +167,42 @@ Lease revocation, protected-connector rejection, and live policy edits are
 exercised by the test suite and the operator console rather than by this
 script.
 
+## Measured performance
+
+Every figure below is copied from
+[`docs/evidence/benchmark-2026-08-21.txt`](docs/evidence/benchmark-2026-08-21.txt),
+which is the unedited output of a single benchmark run.
+
+| Metric | Value |
+| --- | --- |
+| Decision latency, p50 | 0.0106 ms |
+| Decision latency, p95 | 0.0116 ms |
+| Decision latency, p99 | 0.0140 ms |
+| Throughput | 109,031 decisions/second, single-threaded |
+| Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
+| Acceptance suite | 27 of 27 controls passed across 8 categories |
+| Audit chain | Verified |
+
+Reproduce with:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m intentguard.benchmark
+```
+
+Hardware and runtime for the committed run: Apple M3 (8 cores, 4 performance
+and 4 efficiency), 16 GB RAM, macOS 26.2, CPython 3.12.2. The benchmark records
+its own environment block, so a re-run on different hardware is self-labelling.
+
+Scope matters here, so read the numbers narrowly:
+
+- Latency and throughput measure `PolicyEngine.evaluate` in process. They are
+  not HTTP round-trip numbers and do not include FastAPI, serialization, or
+  network time.
+- The operator console measures browser-to-FastAPI p50/p95/p99 separately at
+  runtime through `/v1/demo/benchmark/authorize-probe`. That figure depends on
+  the browser and host, so no value for it is committed here.
+- All state is in memory. These numbers say nothing about a durable store.
+
 ## Project structure
 
 ```text
@@ -178,6 +214,7 @@ script.
 │   ├── architecture.md
 │   ├── build-plan.md
 │   ├── context.md
+│   ├── evidence/                # Committed raw benchmark output
 │   ├── prototype-readiness.md
 │   └── repo-metadata.md         # Repository description and topics
 ├── examples/

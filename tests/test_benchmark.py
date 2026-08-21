@@ -29,6 +29,28 @@ class BenchmarkTest(unittest.TestCase):
             evidence["engine_latency_ms"]["scope"],
         )
         self.assertGreaterEqual(evidence["engine_latency_ms"]["p99"], 0)
+        self.assertGreaterEqual(
+            evidence["engine_latency_ms"]["p99"],
+            evidence["engine_latency_ms"]["p50"],
+        )
+
+        throughput = evidence["engine_throughput"]
+        self.assertEqual(
+            "in_process_policy_engine_single_thread", throughput["scope"]
+        )
+        self.assertEqual(50, throughput["iterations"])
+        self.assertGreater(throughput["elapsed_seconds"], 0)
+        self.assertGreater(throughput["decisions_per_second"], 0)
+
+        environment = evidence["environment"]
+        for key in (
+            "python_version",
+            "python_implementation",
+            "platform",
+            "machine",
+            "cpu_count",
+        ):
+            self.assertIn(key, environment)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
-"""Reproducible policy, latency, concurrency, and audit evidence."""
+"""Reproducible policy, latency, throughput, concurrency, and audit evidence."""
 
 from __future__ import annotations
 
+import os
+import platform
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from statistics import median
-from time import perf_counter_ns
+from time import perf_counter, perf_counter_ns
 from typing import Any
 
 from .models import ActionRequest, AgentProfile, Decision, IntentPassport
@@ -17,6 +19,18 @@ def _percentile(values: list[float], percentile: float) -> float:
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, round((len(ordered) - 1) * percentile)))
     return ordered[index]
+
+
+def _environment() -> dict[str, Any]:
+    """Describe the machine the evidence was produced on."""
+
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+    }
 
 
 def _configured_engine(
@@ -549,6 +563,18 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
         engine.evaluate(_request(f"latency-{index}"), now=now)
         engine_latency_ms.append((perf_counter_ns() - started) / 1_000_000)
 
+    # Throughput is measured over a separate, uninstrumented loop across
+    # pre-built requests so the figure excludes per-iteration timing calls and
+    # request construction.
+    throughput_engine, throughput_now = _configured_engine()
+    throughput_requests = [
+        _request(f"throughput-{index}") for index in range(iterations)
+    ]
+    throughput_started = perf_counter()
+    for throughput_request in throughput_requests:
+        throughput_engine.evaluate(throughput_request, now=throughput_now)
+    throughput_elapsed = perf_counter() - throughput_started
+
     race_engine, race_now = _configured_engine(daily_budget="10000")
     race_requests = [
         _request(f"race-{index}", amount="2000") for index in range(20)
@@ -577,6 +603,7 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
 
     return {
         "iterations": iterations,
+        "environment": _environment(),
         "acceptance": {
             "total": len(acceptance_results),
             "passed": passed,
@@ -592,6 +619,12 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
             "p95": round(_percentile(engine_latency_ms, 0.95), 4),
             "p99": round(_percentile(engine_latency_ms, 0.99), 4),
         },
+        "engine_throughput": {
+            "scope": "in_process_policy_engine_single_thread",
+            "iterations": iterations,
+            "elapsed_seconds": round(throughput_elapsed, 6),
+            "decisions_per_second": round(iterations / throughput_elapsed, 1),
+        },
         "concurrency": {
             "requests": len(race_requests),
             "allowed": len(allowed),
@@ -601,6 +634,7 @@ def run_benchmark(iterations: int = 1000) -> dict[str, Any]:
         },
         "audit_chain_verified": (
             engine.audit_ledger.verify()
+            and throughput_engine.audit_ledger.verify()
             and race_engine.audit_ledger.verify()
             and all(
                 acceptance_engine.audit_ledger.verify()
