@@ -66,9 +66,21 @@ class AuditLedger:
         self._events.append(event)
         return event
 
-    def verify(self) -> bool:
+    def first_invalid_link(self) -> int | None:
+        """Return the 1-based position of the first event that breaks the chain.
+
+        Returns ``None`` when the whole chain verifies. The position is the
+        offset in the stored list rather than the ``sequence`` field, because
+        ``sequence`` is itself part of the tampered data: after a deletion the
+        surviving events keep their original sequence numbers, and the position
+        is what identifies where the chain actually breaks.
+
+        This applies exactly the checks :meth:`verify` has always applied. It
+        reports where they first fail; it does not add any.
+        """
+
         previous_hash = self.GENESIS_HASH
-        for event in self._events:
+        for position, event in enumerate(self._events, start=1):
             expected_hash = hashlib.sha256(
                 self._canonical(
                     {
@@ -81,11 +93,14 @@ class AuditLedger:
                 ).encode("utf-8")
             ).hexdigest()
             if event.previous_hash != previous_hash:
-                return False
+                return position
             if event.event_hash != expected_hash:
-                return False
+                return position
             previous_hash = event.event_hash
-        return True
+        return None
+
+    def verify(self) -> bool:
+        return self.first_invalid_link() is None
 
     @staticmethod
     def _canonical(value: dict[str, Any]) -> str:
