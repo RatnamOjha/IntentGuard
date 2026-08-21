@@ -41,6 +41,12 @@ governance gateway that demonstrate:
 - fleet-epoch invalidation of outstanding authorizations;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
+Six adversarial tests in [`tests/test_adversarial.py`](tests/test_adversarial.py)
+hold those controls open against deliberate attack: intent tampering, replay
+after revocation, budget time-of-check/time-of-use, a concurrent spend race,
+fleet-epoch bypass, and audit-chain tampering. The limits of what any of it
+covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Production architecture and current prototype
 
 The listed challenge technologies are examples rather than requirements. We are
@@ -140,6 +146,7 @@ $env:INTENTGUARD_CORS_ORIGINS="https://operator.example.com"
 
 Submission resources:
 
+- [`docs/threat-model.md`](docs/threat-model.md) — what IntentGuard defends against, and what it explicitly does not
 - [`docs/prototype-readiness.md`](docs/prototype-readiness.md) — critical-gap coverage and final checklist
 - [`docs/api-contract.md`](docs/api-contract.md) — live frontend/backend contract
 
@@ -216,7 +223,8 @@ Scope matters here, so read the numbers narrowly:
 │   ├── context.md
 │   ├── evidence/                # Committed raw benchmark output
 │   ├── prototype-readiness.md
-│   └── repo-metadata.md         # Repository description and topics
+│   ├── repo-metadata.md         # Repository description and topics
+│   └── threat-model.md          # Defences, non-defences, trust boundaries
 ├── examples/
 │   └── demo.py                  # Four-scenario worked example
 ├── prototype/                   # Operator console (React, Next.js, vinext)
@@ -240,6 +248,7 @@ Scope matters here, so read the numbers narrowly:
 │       ├── models.py            # Domain models
 │       └── policy_engine.py     # Runtime policy evaluation
 └── tests/
+    ├── test_adversarial.py      # Six attack classes against the real engine
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py
