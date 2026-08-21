@@ -431,7 +431,19 @@ class PolicyEngine:
             existing = self._authorizations.get(request.request_id)
             if existing is not None:
                 previous_request, previous_result = existing
-                if not self._same_idempotent_request(previous_request, request):
+                conflicts = self._conflicting_fields(previous_request, request)
+                if conflicts:
+                    # Record the attempt before refusing it. A rejected tamper
+                    # that leaves no trace is invisible to an investigator.
+                    self.audit_ledger.append(
+                        "authorization.rejected",
+                        {
+                            "request_id": request.request_id,
+                            "agent_id": request.agent_id,
+                            "reason": "request_id_reuse_with_different_action_data",
+                            "conflicting_fields": list(conflicts),
+                        },
+                    )
                     raise ValueError(
                         "The request ID was already used with different action data."
                     )
@@ -683,21 +695,37 @@ class PolicyEngine:
         return result
 
     @staticmethod
-    def _same_idempotent_request(
+    def _conflicting_fields(
         previous: ActionRequest, current: ActionRequest
+    ) -> tuple[str, ...]:
+        """Name the action fields that differ, ignoring client/server timestamps.
+
+        Only the field names are returned. The submitted values are attacker
+        controlled and are deliberately not copied into the audit payload.
+        """
+
+        return tuple(
+            field
+            for field in (
+                "request_id",
+                "agent_id",
+                "action",
+                "amount",
+                "currency",
+                "intent_id",
+                "risk_score",
+                "attributes",
+            )
+            if getattr(previous, field) != getattr(current, field)
+        )
+
+    @classmethod
+    def _same_idempotent_request(
+        cls, previous: ActionRequest, current: ActionRequest
     ) -> bool:
         """Compare action semantics while ignoring client/server timestamp drift."""
 
-        return (
-            previous.request_id == current.request_id
-            and previous.agent_id == current.agent_id
-            and previous.action == current.action
-            and previous.amount == current.amount
-            and previous.currency == current.currency
-            and previous.intent_id == current.intent_id
-            and previous.risk_score == current.risk_score
-            and previous.attributes == current.attributes
-        )
+        return not cls._conflicting_fields(previous, current)
 
     def commit_reservation(
         self,
@@ -825,13 +853,44 @@ class PolicyEngine:
         *,
         executed_at: datetime | None = None,
     ) -> None:
+        """Record spend for an already-executed action, re-checking the cap.
+
+        A :class:`DecisionRecord` only observes the budget; it does not hold it.
+        By the time an action is recorded the headroom the decision saw may be
+        gone, so the cap is re-checked here against live committed and reserved
+        exposure. Callers that need the funds held across the gap should use
+        :meth:`authorize_action` and :meth:`commit_reservation` instead.
+        """
+
         with self._lock:
             if decision.decision is not Decision.ALLOW:
                 raise ValueError("Only allowed actions can be recorded as executed.")
             if decision.request_id != request.request_id:
                 raise ValueError("The decision belongs to a different request.")
             timestamp = executed_at or datetime.now(timezone.utc)
-            self._daily_spend[(request.agent_id, timestamp.date())] += request.amount
+            self._expire_reservations_unlocked(timestamp)
+            agent = self._agents.get(request.agent_id)
+            if agent is None:
+                raise KeyError(f"Unknown agent: {request.agent_id}")
+
+            key = (request.agent_id, timestamp.date())
+            exposure = self._daily_spend[key] + self._reserved_spend[key]
+            if request.amount > agent.daily_budget - exposure:
+                self.audit_ledger.append(
+                    "action.execution_rejected",
+                    {
+                        "request_id": request.request_id,
+                        "agent_id": request.agent_id,
+                        "amount": request.amount,
+                        "currency": request.currency,
+                        "reason": "daily_budget_exceeded",
+                    },
+                )
+                raise ValueError(
+                    "The action exceeds the agent's remaining daily budget."
+                )
+
+            self._daily_spend[key] += request.amount
             self.audit_ledger.append(
                 "action.executed",
                 {
