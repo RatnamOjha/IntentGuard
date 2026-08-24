@@ -24,8 +24,8 @@ class BenchmarkTest(unittest.TestCase):
     def test_benchmark_is_reproducible_and_safe(self) -> None:
         evidence = run_benchmark(iterations=50)
 
-        self.assertEqual(30, evidence["acceptance"]["total"])
-        self.assertEqual(30, evidence["acceptance"]["passed"])
+        self.assertEqual(31, evidence["acceptance"]["total"])
+        self.assertEqual(31, evidence["acceptance"]["passed"])
         self.assertEqual(0, evidence["acceptance"]["failed"])
         self.assertEqual([], evidence["acceptance"]["failures"])
         self.assertGreaterEqual(evidence["acceptance"]["category_count"], 10)

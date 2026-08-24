@@ -46,10 +46,11 @@ governance gateway that demonstrate:
   checkpoint that detects truncation of the newest events;
 - a live React dashboard connected to the REST and OpenAPI contract.
 
-Seven adversarial suites in [`tests/test_adversarial.py`](tests/test_adversarial.py)
+Eight adversarial suites in [`tests/test_adversarial.py`](tests/test_adversarial.py)
 hold those controls open against deliberate attack: intent tampering, replay
 after revocation, budget time-of-check/time-of-use, a concurrent spend race,
-fleet-epoch bypass, self-reported risk, and audit-chain tampering. The limits of what any of it
+fleet-epoch bypass, self-reported risk, cross-customer intent reuse,
+and audit-chain tampering. The limits of what any of it
 covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Production architecture and current prototype
@@ -85,7 +86,7 @@ production-roadmap components.
 | Dynamic spend caps | Concurrency-safe reserve/commit/release lifecycle with live budget editing |
 | Revocation and emergency stop | Per-agent revocation epochs and a fleet-wide kill switch |
 | Operator dashboard | Live React console for policy, budgets, approvals, fleet controls, and audit |
-| Accuracy, latency, and auditability | 30-control acceptance suite, measured HTTP round-trip and in-process engine latency, concurrency tests, and a hash-chained audit trail with a truncation-detecting head checkpoint |
+| Accuracy, latency, and auditability | 31-control acceptance suite, measured HTTP round-trip and in-process engine latency, concurrency tests, and a hash-chained audit trail with a truncation-detecting head checkpoint |
 
 ## Quick start
 
@@ -193,11 +194,11 @@ against a real Uvicorn server at 16 concurrent clients.
 
 | Metric | Value |
 | --- | --- |
-| Authorization latency, p50 | 6.87 ms |
-| Authorization latency, p95 | 9.05 ms |
-| Authorization latency, p99 | 11.24 ms |
-| Slowest request | 12.82 ms |
-| Throughput | 2,160 requests/second at concurrency 16 |
+| Authorization latency, p50 | 6.85 ms |
+| Authorization latency, p95 | 9.62 ms |
+| Authorization latency, p99 | 13.59 ms |
+| Slowest request | 17.13 ms |
+| Throughput | 2,002 requests/second at concurrency 16 |
 
 ### Policy engine, in process
 
@@ -206,17 +207,17 @@ evaluation is not the bottleneck; **not** a figure to quote as system latency.
 
 | Metric | Value |
 | --- | --- |
-| Decision latency, p50 | 0.0149 ms |
-| Decision latency, p95 | 0.0174 ms |
-| Decision latency, p99 | 0.0192 ms |
-| Throughput | 71,859 decisions/second, single-threaded |
+| Decision latency, p50 | 0.0145 ms |
+| Decision latency, p95 | 0.0163 ms |
+| Decision latency, p99 | 0.0207 ms |
+| Throughput | 70,637 decisions/second, single-threaded |
 
 ### Correctness under load
 
 | Metric | Value |
 | --- | --- |
 | Concurrency test | 20 simultaneous INR 2,000 requests against an INR 10,000 daily cap: 5 allowed, INR 10,000 reserved, 0 overspend violations |
-| Acceptance suite | 30 of 30 controls passed across 10 categories |
+| Acceptance suite | 31 of 31 controls passed across 10 categories |
 | Audit chain | Verified, including the head checkpoint |
 
 Reproduce with:
@@ -280,7 +281,7 @@ Caveats worth reading before quoting any of this:
 │       ├── models.py            # Domain models
 │       └── policy_engine.py     # Runtime policy evaluation
 └── tests/
-    ├── test_adversarial.py      # Seven attack classes against the real engine
+    ├── test_adversarial.py      # Eight attack classes against the real engine
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py

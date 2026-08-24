@@ -102,6 +102,7 @@ def _request(
     currency: str = "INR",
     risk_score: int = 20,
     attributes: dict[str, Any] | None = None,
+    customer_id: str | None = None,
 ) -> ActionRequest:
     return ActionRequest(
         request_id=request_id,
@@ -111,6 +112,7 @@ def _request(
         currency=currency,
         intent_id=intent_id,
         risk_score=risk_score,
+        customer_id=customer_id,
         attributes=(
             {"refundable": True}
             if attributes is None
@@ -328,6 +330,16 @@ def _run_acceptance_suite() -> tuple[list[dict[str, Any]], list[PolicyEngine]]:
         _request("deny-unknown-agent", agent_id="missing-agent"),
         Decision.DENY,
         "AGENT_UNKNOWN",
+    )
+
+    decision(
+        "Intent belonging to another customer is denied",
+        "authenticated intent",
+        base,
+        base_now,
+        _request("deny-intent-customer", customer_id="another-customer"),
+        Decision.DENY,
+        "INTENT_CUSTOMER_MISMATCH",
     )
 
     action_mismatch, action_mismatch_now = configured(

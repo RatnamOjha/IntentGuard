@@ -353,6 +353,18 @@ class PolicyEngine:
             )
             self._check(
                 findings,
+                condition=(
+                    request.customer_id is None
+                    or intent.customer_id == request.customer_id
+                ),
+                code="INTENT_CUSTOMER_MISMATCH",
+                failure=(
+                    "The intent belongs to a different customer than the one "
+                    "this action is proposed for."
+                ),
+            )
+            self._check(
+                findings,
                 condition=intent.currency == request.currency,
                 code="INTENT_CURRENCY_MISMATCH",
                 failure="The request currency differs from the authorized currency.",
@@ -771,6 +783,7 @@ class PolicyEngine:
                 "intent_id",
                 "risk_score",
                 "attributes",
+                "customer_id",
             )
             if getattr(previous, field) != getattr(current, field)
         )

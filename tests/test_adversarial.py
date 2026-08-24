@@ -33,6 +33,7 @@ from intentguard import (  # noqa: E402
     AgentProfile,
     AuditLedger,
     Decision,
+    DecisionRecord,
     IntentPassport,
     PolicyEngine,
     ReservationStatus,
@@ -586,6 +587,149 @@ class FleetEpochBypassTest(unittest.TestCase):
             now=self.now,
         )
         self.assertEqual(Decimal("1000"), spent_today(self.engine, self.now))
+
+
+class CrossCustomerIntentTest(unittest.TestCase):
+    """8. Spending against another customer's authorization."""
+
+    def setUp(self) -> None:
+        # One concierge agent serving two customers, as a real deployment would.
+        self.now = datetime(2026, 8, 22, 10, tzinfo=timezone.utc)
+        self.engine = PolicyEngine()
+        self.engine.register_agent(
+            AgentProfile(
+                agent_id=AGENT_ID,
+                name="Shared Concierge",
+                allowed_actions=frozenset({"book_flight"}),
+                max_action_amount=Decimal("50000"),
+                daily_budget=Decimal("100000"),
+            )
+        )
+        for customer, ceiling in (("alice", "5000"), ("bob", "45000")):
+            self.engine.register_intent(
+                IntentPassport(
+                    intent_id=f"intent-{customer}",
+                    customer_id=customer,
+                    agent_id=AGENT_ID,
+                    action="book_flight",
+                    max_amount=Decimal(ceiling),
+                    currency="INR",
+                    expires_at=self.now + timedelta(hours=2),
+                )
+            )
+
+    def _attempt(
+        self, request_id: str, *, intent_id: str, customer_id: str | None, amount: str
+    ) -> DecisionRecord:
+        return self.engine.evaluate(
+            ActionRequest(
+                request_id=request_id,
+                agent_id=AGENT_ID,
+                action="book_flight",
+                amount=Decimal(amount),
+                currency="INR",
+                intent_id=intent_id,
+                risk_score=0,
+                attributes={},
+                customer_id=customer_id,
+            ),
+            now=self.now,
+        )
+
+    def test_citing_another_customers_intent_is_denied(self) -> None:
+        """Alice's ceiling is 5,000; Bob's intent must not raise it to 45,000."""
+
+        decision = self._attempt(
+            "cross-customer",
+            intent_id="intent-bob",
+            customer_id="alice",
+            amount="45000",
+        )
+
+        self.assertIs(Decision.DENY, decision.decision)
+        self.assertIn(
+            "INTENT_CUSTOMER_MISMATCH",
+            [finding.code for finding in decision.findings],
+        )
+
+    def test_each_customer_can_still_use_their_own_intent(self) -> None:
+        """The control must not break the ordinary case."""
+
+        for customer, amount in (("alice", "5000"), ("bob", "45000")):
+            with self.subTest(customer=customer):
+                decision = self._attempt(
+                    f"own-{customer}",
+                    intent_id=f"intent-{customer}",
+                    customer_id=customer,
+                    amount=amount,
+                )
+                self.assertIs(Decision.ALLOW, decision.decision)
+
+    def test_the_binding_also_holds_through_authorization(self) -> None:
+        """No lease or reservation is issued for a mismatched customer."""
+
+        result = self.engine.authorize_action(
+            ActionRequest(
+                request_id="cross-customer-authorize",
+                agent_id=AGENT_ID,
+                action="book_flight",
+                amount=Decimal("45000"),
+                currency="INR",
+                intent_id="intent-bob",
+                risk_score=0,
+                attributes={},
+                customer_id="alice",
+            ),
+            now=self.now,
+        )
+
+        self.assertIs(Decision.DENY, result.decision.decision)
+        self.assertIsNone(result.reservation)
+        self.assertIsNone(result.lease)
+
+    def test_the_same_request_id_cannot_be_reused_across_customers(self) -> None:
+        """Swapping only the customer is a different action, not a replay."""
+
+        first = self.engine.authorize_action(
+            ActionRequest(
+                request_id="shared-id",
+                agent_id=AGENT_ID,
+                action="book_flight",
+                amount=Decimal("5000"),
+                currency="INR",
+                intent_id="intent-alice",
+                risk_score=0,
+                attributes={},
+                customer_id="alice",
+            ),
+            now=self.now,
+        )
+        self.assertIs(Decision.ALLOW, first.decision.decision)
+
+        with self.assertRaises(ValueError) as raised:
+            self.engine.authorize_action(
+                ActionRequest(
+                    request_id="shared-id",
+                    agent_id=AGENT_ID,
+                    action="book_flight",
+                    amount=Decimal("5000"),
+                    currency="INR",
+                    intent_id="intent-alice",
+                    risk_score=0,
+                    attributes={},
+                    customer_id="bob",
+                ),
+                now=self.now,
+            )
+        self.assertIn("different action data", str(raised.exception))
+
+    def test_unauthenticated_callers_keep_working(self) -> None:
+        """customer_id is optional, so existing integrations are unaffected."""
+
+        decision = self._attempt(
+            "legacy", intent_id="intent-bob", customer_id=None, amount="45000"
+        )
+        self.assertIs(Decision.ALLOW, decision.decision)
 
 
 class SelfReportedRiskTest(unittest.TestCase):

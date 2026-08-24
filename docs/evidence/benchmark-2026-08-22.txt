@@ -8,8 +8,8 @@
     "cpu_count": 8
   },
   "acceptance": {
-    "total": 30,
-    "passed": 30,
+    "total": 31,
+    "passed": 31,
     "failed": 0,
     "category_count": 10,
     "categories": [
@@ -240,6 +240,21 @@
         }
       },
       {
+        "name": "Intent belonging to another customer is denied",
+        "category": "authenticated intent",
+        "passed": true,
+        "expected": {
+          "decision": "deny",
+          "finding": "INTENT_CUSTOMER_MISMATCH"
+        },
+        "observed": {
+          "decision": "deny",
+          "findings": [
+            "INTENT_CUSTOMER_MISMATCH"
+          ]
+        }
+      },
+      {
         "name": "Intent action mismatch is denied",
         "category": "authenticated intent",
         "passed": true,
@@ -428,27 +443,27 @@
   },
   "engine_latency_ms": {
     "scope": "in_process_policy_engine",
-    "p50": 0.0149,
-    "p95": 0.0174,
-    "p99": 0.0192
+    "p50": 0.0145,
+    "p95": 0.0163,
+    "p99": 0.0207
   },
   "http_round_trip_ms": {
     "scope": "http_round_trip_authorize",
     "measured": true,
     "requests": 500,
     "concurrency": 16,
-    "elapsed_seconds": 0.231462,
-    "requests_per_second": 2160.2,
-    "p50": 6.866,
-    "p95": 9.0543,
-    "p99": 11.242,
-    "max": 12.8164
+    "elapsed_seconds": 0.249744,
+    "requests_per_second": 2002.0,
+    "p50": 6.8493,
+    "p95": 9.6206,
+    "p99": 13.585,
+    "max": 17.1288
   },
   "engine_throughput": {
     "scope": "in_process_policy_engine_single_thread",
     "iterations": 1000,
-    "elapsed_seconds": 0.013916,
-    "decisions_per_second": 71859.1
+    "elapsed_seconds": 0.014157,
+    "decisions_per_second": 70637.1
   },
   "concurrency": {
     "requests": 20,

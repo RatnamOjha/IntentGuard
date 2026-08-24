@@ -75,6 +75,12 @@ class ActionRequest:
     intent_id: str
     risk_score: int
     attributes: dict[str, Any] = field(default_factory=dict)
+    # The customer on whose behalf the action is proposed. Optional so existing
+    # single-customer callers keep working, but when supplied the engine
+    # requires the cited intent to belong to this customer. Authenticated
+    # callers must always set it from the verified session, never from agent
+    # input.
+    customer_id: str | None = None
     occurred_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

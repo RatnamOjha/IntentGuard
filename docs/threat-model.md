@@ -16,6 +16,7 @@ Each control below is held open by a named test in
 | Spending the same headroom twice across a check/execute gap | `authorize_action` holds the funds under the engine lock rather than observing them; `record_execution` re-checks live exposure and refuses. | `BudgetTimeOfCheckTimeOfUseTest` |
 | Concurrent requests each under the cap, summing above it | Budget mutation is serialized on one `RLock`. 20 barrier-released threads, 50 iterations, commit exactly 9,000 against a 10,000 cap every time. | `ConcurrentSpendRaceTest` |
 | Executing work already in flight when the kill switch is pulled | `stop_fleet` bumps a fleet epoch and releases held reservations. Leases carry their issuing epoch, so pre-stop authorizations stay rejected even after the fleet resumes. | `FleetEpochBypassTest` |
+| Spending against another customer's authorization | `IntentPassport` carries a `customer_id`, and when an authenticated caller supplies `ActionRequest.customer_id` the engine requires the cited intent to belong to that customer, denying with `INTENT_CUSTOMER_MISMATCH`. The field is optional, so it only binds where a caller establishes who is acting. | `CrossCustomerIntentTest` |
 | An agent grading its own risk to skip human approval | The gateway derives risk from the registered intent envelope, live budget exposure, authorization velocity, refundability, and deviation from the authorized attributes. The agent's declared score may only raise the effective score, never lower it, and an under-declaration that would have skipped review is recorded as `RISK_SCORE_UNDER_DECLARED`. | `SelfReportedRiskTest` |
 | Rewriting decision history | SHA-256 hash chain. Payload mutation, field mutation, deletion of a middle event, and reordering are all detected; `first_invalid_link()` names where the chain breaks. | `AuditChainTamperingTest` |
 | Deleting the newest events to hide an attack | The expected length and head hash are held in a checkpoint outside the chain, so truncation -- which a bare hash chain cannot see -- is rejected. | `AuditChainTamperingTest` |
@@ -50,6 +51,10 @@ Blunt list. None of these are mitigated today.
   agent can hide, not what a well-resourced attacker can construct.
 - **Self-asserted agent identity.** `agent_id` is an unverified string. There
   are no agent credentials, so one agent can act as another.
+- **Self-asserted customer identity.** `customer_id` binds an action to an
+  intent, but nothing yet proves the caller is that customer. The binding is
+  only as strong as whatever establishes the value; with no authentication on
+  the API, a caller can currently claim any customer.
 - **Unsigned intent.** `IntentPassport` is registered over the open API and
   stored as a plain object. "Authenticated customer intent" means intent that
   was registered, not intent that is cryptographically bound to a customer.
