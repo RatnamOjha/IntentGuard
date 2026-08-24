@@ -1,12 +1,15 @@
-// Type-generation source only.
+// Type-generation source only. Deliberately NOT at the project root.
 //
-// The dev and build pipeline gets its worker configuration inline from
-// `localBindingConfig` in vite.config.ts, which is what @cloudflare/vite-plugin
-// actually uses. This file exists so `wrangler types` can regenerate
-// worker-configuration.d.ts; keep the two in step if bindings change.
+// @cloudflare/vite-plugin auto-detects a wrangler config in the project root
+// and merges it with the inline `localBindingConfig` from vite.config.ts, which
+// duplicates compatibility flags and stops the dev runtime from starting. The
+// inline object is the real configuration; this file exists purely so
+// `wrangler types` has something to read.
+//
+// Regenerate with: pnpm run types
 {
   "name": "intentguard-prototype",
-  "main": "./worker/index.ts",
+  "main": "../worker/index.ts",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"]
 }
