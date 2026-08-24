@@ -92,19 +92,21 @@ Prompt injection can make the model propose anything. It cannot make the engine
 approve it, and `InjectedInstructionTest` in
 [`tests/test_agent.py`](tests/test_agent.py) holds that open.
 
-Set an API key to use a real model. Two providers are supported and the right
-one is inferred from the key prefix, because their names are easy to confuse:
-
-| Provider | Key prefix | Endpoint | Default model |
-| --- | --- | --- | --- |
-| xAI (Grok) | `xai-` | `https://api.x.ai/v1` | `grok-4.6` |
-| Groq | `gsk_` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+The agent runs on **xAI's Grok**. Get a key from
+[console.x.ai](https://console.x.ai) and export it:
 
 ```bash
-export XAI_API_KEY=xai-...     # or GROQ_API_KEY=gsk_...
+export XAI_API_KEY=xai-...
 ```
 
-Override with `INTENTGUARD_LLM_PROVIDER` and `INTENTGUARD_LLM_MODEL` if needed.
+Grok keys start with `xai-`. Note that **Groq** (`gsk_`, [groq.com](https://groq.com))
+is a different company with a confusingly similar name; if you paste one of its
+keys the agent detects the prefix and routes to Groq rather than failing with an
+opaque error, but Grok is the supported path.
+
+Override the model with `INTENTGUARD_LLM_MODEL` if your account has different
+access, and the provider with `INTENTGUARD_LLM_PROVIDER`.
+
 Without any key the agent falls back to a deterministic scripted planner, so a
 fresh clone demos end to end and CI runs the same governance path with no key
 and no network.

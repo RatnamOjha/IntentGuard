@@ -15,6 +15,10 @@ side of the boundary.
 * A declared ``risk_score`` can only raise the effective risk, never lower it.
 * Prompt injection can make the model propose anything. It cannot make the
   engine approve it.
+
+The intended provider is xAI's Grok; set ``XAI_API_KEY``. Without a key the
+agent falls back to a deterministic scripted planner so the demo and the tests
+run offline.
 """
 
 from __future__ import annotations
@@ -46,7 +50,11 @@ class Provider:
     key_prefix: str
 
 
-# Both speak the same chat-completions dialect, so one planner serves both.
+# xAI's Grok is the intended provider. Groq is a different company with a
+# confusingly similar name, and its keys are easy to reach for by mistake;
+# supporting it means a mistyped provider yields a working agent rather than an
+# opaque 400. Both speak the same chat-completions dialect, so one planner
+# serves both.
 PROVIDERS: dict[str, Provider] = {
     "xai": Provider(
         name="xai",
@@ -465,8 +473,9 @@ def build_planner(
 ) -> Planner:
     """Use a model when a key is configured, otherwise the scripted planner.
 
-    The provider is inferred from the key prefix so an xAI key and a Groq key
-    both just work. ``INTENTGUARD_LLM_PROVIDER`` overrides the inference.
+    Set ``XAI_API_KEY`` to a Grok key from https://console.x.ai. The provider is
+    inferred from the key prefix, so a Groq key also works rather than failing
+    obscurely. ``INTENTGUARD_LLM_PROVIDER`` overrides the inference.
     """
 
     key = api_key

@@ -1,8 +1,8 @@
 """Talk to the governed agent from a terminal.
 
 Runs against an in-process policy engine, so it needs no server. Set
-XAI_API_KEY to talk to Grok; without it a deterministic scripted planner is
-used and everything still works.
+XAI_API_KEY to a Grok key from https://console.x.ai; without one a
+deterministic scripted planner is used and everything still works.
 
     PYTHONPATH=src .venv/bin/python examples/chat.py
 
@@ -149,7 +149,8 @@ def main() -> None:
     print(f"planner: {agent.planner.name}", end="")
     if agent.planner.name == "scripted":
         print(
-            f"  {DIM}(set XAI_API_KEY for Grok, or GROQ_API_KEY for Groq){RESET}"
+            f"  {DIM}(export XAI_API_KEY=xai-... for Grok, "
+            f"from https://console.x.ai){RESET}"
         )
     else:
         print()
