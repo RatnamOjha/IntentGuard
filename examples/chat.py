@@ -1,7 +1,7 @@
 """Talk to the governed agent from a terminal.
 
-Runs against an in-process policy engine, so it needs no server. Set
-XAI_API_KEY to a Grok key from https://console.x.ai; without one a
+Runs against an in-process policy engine, so it needs no server. Put a Grok key
+from https://console.x.ai in `.env` as XAI_API_KEY, or export it; without one a
 deterministic scripted planner is used and everything still works.
 
     PYTHONPATH=src .venv/bin/python examples/chat.py
@@ -23,6 +23,7 @@ from intentguard import (
     IntentPassport,
     PolicyEngine,
     build_planner,
+    load_env_file,
 )
 
 CUSTOMER = "card-member-001"
@@ -142,6 +143,7 @@ SUGGESTIONS = (
 
 
 def main() -> None:
+    load_env_file()
     engine = build_engine()
     agent = GovernedAgent(engine, planner=build_planner())
 
