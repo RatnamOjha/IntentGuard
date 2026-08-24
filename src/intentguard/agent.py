@@ -65,7 +65,7 @@ PROVIDERS: dict[str, Provider] = {
     "groq": Provider(
         name="groq",
         base_url="https://api.groq.com/openai/v1",
-        default_model="llama-3.3-70b-versatile",
+        default_model="openai/gpt-oss-120b",
         key_prefix="gsk_",
     ),
 }
@@ -421,7 +421,9 @@ class ChatCompletionsPlanner:
                 f"{self.provider.name} keys start with "
                 f"'{self.provider.key_prefix}'."
             )
-        elif response.status_code == 400 and "model" in detail.lower():
+        elif "model" in detail.lower():
+            # Providers disagree on the status for an unavailable model: xAI
+            # returns 400, Groq returns 404. Key off the message instead.
             hint = (
                 f" Model '{self.model}' may not be available on this account. "
                 "Set INTENTGUARD_LLM_MODEL to one that is."

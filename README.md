@@ -93,11 +93,16 @@ approve it, and `InjectedInstructionTest` in
 [`tests/test_agent.py`](tests/test_agent.py) holds that open.
 
 The agent runs on **xAI's Grok**. Get a key from
-[console.x.ai](https://console.x.ai) and export it:
+[console.x.ai](https://console.x.ai) and put it in `.env`:
 
 ```bash
-export XAI_API_KEY=xai-...
+cp .env.example .env
+# then set XAI_API_KEY=xai-... in .env
 ```
+
+`.env` is gitignored; `.env.example` is committed and must stay blank. The demo
+script, the `intentguard-api` console script, and `examples/chat.py` all load
+`.env` automatically, and anything already exported in your shell wins over it.
 
 Grok keys start with `xai-`. Note that **Groq** (`gsk_`, [groq.com](https://groq.com))
 is a different company with a confusingly similar name; if you paste one of its
@@ -339,6 +344,7 @@ Caveats worth reading before quoting any of this:
 │       ├── __init__.py          # Public package surface
 │       ├── agent.py              # Grok-backed agent, scripted fallback
 │       ├── api.py               # FastAPI governance gateway
+│       ├── config.py            # .env loading, stdlib only
 │       ├── audit.py             # Hash-chained audit ledger
 │       ├── benchmark.py         # Acceptance, latency, and race evidence
 │       ├── models.py            # Domain models
@@ -349,6 +355,7 @@ Caveats worth reading before quoting any of this:
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py
+    ├── test_config.py
     └── test_policy_engine.py
 ```
 

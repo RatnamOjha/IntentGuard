@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .agent import GovernedAgent, build_planner
 from .benchmark import api_probe_request, create_api_probe_engine, run_benchmark
+from .config import load_env_file
 from .models import ActionRequest, AgentProfile, IntentPassport
 from .policy_engine import PolicyEngine
 
@@ -654,5 +655,10 @@ def run() -> None:
     """Run the development API via the installed console script."""
 
     import uvicorn
+
+    # Entry points opt into .env; importing the library never touches the disk.
+    loaded = load_env_file()
+    if loaded:
+        print(f"Loaded {', '.join(sorted(loaded))} from .env")
 
     uvicorn.run("intentguard.api:app", host="127.0.0.1", port=8000, reload=True)

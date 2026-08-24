@@ -615,7 +615,7 @@ class PlannerSelectionTest(unittest.TestCase):
         self.assertIsInstance(planner, ChatCompletionsPlanner)
         self.assertEqual("groq", planner.provider.name)
         self.assertEqual("https://api.groq.com/openai/v1", planner.base_url)
-        self.assertEqual("llama-3.3-70b-versatile", planner.model)
+        self.assertEqual("openai/gpt-oss-120b", planner.model)
 
     def test_an_explicit_provider_overrides_the_key_prefix(self) -> None:
         planner = build_planner(api_key="gsk_test", provider="xai")

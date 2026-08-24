@@ -30,12 +30,22 @@ if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vinext" ]]; then
   )
 fi
 
-"$VENV_PYTHON" -m uvicorn intentguard.api:app \
-  --app-dir "$PROJECT_DIR/src" \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --reload \
-  --reload-dir "$PROJECT_DIR/src" &
+API_ARGS=(
+  -m uvicorn intentguard.api:app
+  --app-dir "$PROJECT_DIR/src"
+  --host 127.0.0.1
+  --port 8000
+  --reload
+  --reload-dir "$PROJECT_DIR/src"
+)
+# Local secrets live in .env, which is gitignored. Anything already exported
+# wins, so the shell still beats the file.
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  API_ARGS+=(--env-file "$PROJECT_DIR/.env")
+  echo "Loading environment from .env"
+fi
+
+"$VENV_PYTHON" "${API_ARGS[@]}" &
 API_PID=$!
 
 cleanup() {

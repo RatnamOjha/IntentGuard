@@ -319,5 +319,63 @@ class ApiTest(unittest.TestCase):
         )
 
 
+@unittest.skipIf(TestClient is None, "Install the api and dev extras to test FastAPI")
+class AgentEndpointTest(unittest.TestCase):
+    """The agent endpoint, pinned to the scripted planner so it never calls out."""
+
+    def setUp(self) -> None:
+        from intentguard.agent import GovernedAgent, ScriptedPlanner
+        from intentguard.api import create_app
+
+        self.engine = PolicyEngine()
+        app = create_app(self.engine)
+        # A developer with a key exported must not make this suite hit the
+        # network, so the planner is replaced rather than inherited.
+        app.state.agent = GovernedAgent(self.engine, planner=ScriptedPlanner())
+        self.client = TestClient(app)
+        self.client.post("/v1/demo/bootstrap")
+
+    def _say(self, message: str, customer_id: str = "demo-customer") -> dict:
+        response = self.client.post(
+            "/v1/agent/message",
+            json={
+                "message": message,
+                "customer_id": customer_id,
+                "agent_id": "agt_travel_01",
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        return response.json()
+
+    def test_a_compliant_request_is_allowed(self) -> None:
+        body = self._say("book a refundable hotel in BOM for 12000")
+
+        self.assertEqual("allow", body["decision"])
+        self.assertEqual("scripted", body["planner"])
+        self.assertIsNotNone(body["authorization"]["lease"])
+
+    def test_an_out_of_policy_request_is_refused_with_reasons(self) -> None:
+        body = self._say("book a non-refundable hotel for 9000")
+
+        self.assertEqual("deny", body["decision"])
+        self.assertTrue(body["blocked_reasons"])
+        self.assertIsNone(body["authorization"]["lease"])
+
+    def test_intents_are_scoped_to_the_requesting_customer(self) -> None:
+        response = self.client.get(
+            "/v1/agent/intents",
+            params={"customer_id": "someone-else", "agent_id": "agt_travel_01"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([], response.json())
+
+    def test_refusals_reach_the_audit_trail(self) -> None:
+        self._say("book a non-refundable hotel for 9000")
+
+        status = self.client.get("/v1/audit/status").json()
+        self.assertTrue(status["verified"])
+
+
 if __name__ == "__main__":
     unittest.main()

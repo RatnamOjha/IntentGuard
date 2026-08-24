@@ -44,6 +44,13 @@ $ApiArguments = @(
     "--reload",
     "--reload-dir", (Join-Path $ProjectDir "src")
 )
+# Local secrets live in .env, which is gitignored. Anything already set in the
+# environment wins over the file.
+$EnvFile = Join-Path $ProjectDir ".env"
+if (Test-Path $EnvFile) {
+    $ApiArguments += @("--env-file", $EnvFile)
+    Write-Host "Loading environment from .env"
+}
 $ApiProcess = Start-Process -FilePath $VenvPython `
     -ArgumentList $ApiArguments `
     -NoNewWindow `

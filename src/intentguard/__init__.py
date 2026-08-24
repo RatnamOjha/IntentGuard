@@ -11,6 +11,7 @@ from .agent import (
     build_planner,
 )
 from .audit import AuditLedger, LedgerCheckpoint
+from .config import load_env_file
 from .models import (
     ActionRequest,
     AgentProfile,
@@ -42,6 +43,7 @@ __all__ = [
     "GovernedAgent",
     "HumanApproval",
     "IntentPassport",
+    "load_env_file",
     "LedgerCheckpoint",
     "PlannerError",
     "PolicyEngine",
