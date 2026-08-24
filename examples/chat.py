@@ -102,6 +102,10 @@ def show_intents(agent: GovernedAgent) -> None:
 
 
 def show_turn(turn) -> None:  # noqa: ANN001
+    if turn.error is not None:
+        print(f"  {RED}{BOLD}[agent unavailable]{RESET} {turn.error}")
+        print(f"  {DIM}Nothing was proposed, so nothing was authorized.{RESET}")
+        return
     if turn.decision is None:
         print(f"  {DIM}[no action]{RESET} {turn.reply}")
         return
@@ -144,7 +148,9 @@ def main() -> None:
     print(f"{BOLD}IntentGuard governed agent{RESET}")
     print(f"planner: {agent.planner.name}", end="")
     if agent.planner.name == "scripted":
-        print(f"  {DIM}(set XAI_API_KEY to use Grok){RESET}")
+        print(
+            f"  {DIM}(set XAI_API_KEY for Grok, or GROQ_API_KEY for Groq){RESET}"
+        )
     else:
         print()
     show_intents(agent)

@@ -36,8 +36,50 @@ from .models import (
 )
 from .policy_engine import PolicyEngine
 
-GROK_BASE_URL = "https://api.x.ai/v1"
-DEFAULT_GROK_MODEL = "grok-4.6"
+@dataclass(frozen=True)
+class Provider:
+    """An OpenAI-compatible chat-completions provider."""
+
+    name: str
+    base_url: str
+    default_model: str
+    key_prefix: str
+
+
+# Both speak the same chat-completions dialect, so one planner serves both.
+PROVIDERS: dict[str, Provider] = {
+    "xai": Provider(
+        name="xai",
+        base_url="https://api.x.ai/v1",
+        default_model="grok-4.6",
+        key_prefix="xai-",
+    ),
+    "groq": Provider(
+        name="groq",
+        base_url="https://api.groq.com/openai/v1",
+        default_model="llama-3.3-70b-versatile",
+        key_prefix="gsk_",
+    ),
+}
+DEFAULT_PROVIDER = "xai"
+
+
+def provider_for_key(api_key: str) -> Provider:
+    """Infer the provider from the key prefix.
+
+    xAI (Grok) and Groq are different companies with confusingly similar names,
+    and sending one's key to the other's endpoint returns an opaque 400. The
+    prefixes are distinct, so detect rather than make the user get it right.
+    """
+
+    for provider in PROVIDERS.values():
+        if api_key.startswith(provider.key_prefix):
+            return provider
+    return PROVIDERS[DEFAULT_PROVIDER]
+
+
+class PlannerError(RuntimeError):
+    """The planner could not be reached or refused the request."""
 
 
 @dataclass(frozen=True)
@@ -61,6 +103,7 @@ class AgentTurn:
     reply: str
     proposal: ProposedAction | None = None
     result: AuthorizationResult | None = None
+    error: str | None = None
 
     @property
     def decision(self) -> Decision | None:
@@ -174,10 +217,8 @@ class ScriptedPlanner:
         )
 
 
-class GrokPlanner:
-    """Plans actions with xAI's Grok over its OpenAI-compatible API."""
-
-    name = "grok"
+class ChatCompletionsPlanner:
+    """Plans actions with any OpenAI-compatible chat-completions provider."""
 
     SYSTEM_PROMPT = (
         "You are a financial concierge agent operating behind IntentGuard, a "
@@ -196,18 +237,24 @@ class GrokPlanner:
         self,
         *,
         api_key: str,
-        model: str = DEFAULT_GROK_MODEL,
-        base_url: str = GROK_BASE_URL,
+        provider: Provider | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
         timeout: float = 30.0,
         transport: Any | None = None,
     ) -> None:
         self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.provider = provider or provider_for_key(api_key)
+        self.model = model or self.provider.default_model
+        self.base_url = (base_url or self.provider.base_url).rstrip("/")
         self.timeout = timeout
         # Injectable so tests can exercise the full request/response handling
         # without network access.
         self._transport = transport
+
+    @property
+    def name(self) -> str:
+        return f"{self.provider.name}:{self.model}"
 
     @staticmethod
     def _tool_schema(intents: tuple[IntentPassport, ...]) -> dict[str, Any]:
@@ -315,14 +362,20 @@ class GrokPlanner:
         client_args: dict[str, Any] = {"timeout": self.timeout}
         if self._transport is not None:
             client_args["transport"] = self._transport
-        with httpx.Client(**client_args) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            body = response.json()
+        try:
+            with httpx.Client(**client_args) as client:
+                response = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+                if response.status_code >= 400:
+                    raise PlannerError(self._describe_failure(response))
+                body = response.json()
+        except httpx.RequestError as exc:
+            raise PlannerError(
+                f"Could not reach {self.provider.name} at {self.base_url}: {exc}"
+            ) from exc
 
         choices = body.get("choices") or []
         if not choices:
@@ -336,6 +389,39 @@ class GrokPlanner:
         except (KeyError, TypeError, json.JSONDecodeError):
             return None
         return self._to_proposal(arguments, intents)
+
+    def _describe_failure(self, response: Any) -> str:
+        """Turn a provider error into something a human can act on."""
+
+        detail = ""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                error = body.get("error")
+                detail = (
+                    error.get("message", "")
+                    if isinstance(error, dict)
+                    else str(error or body.get("message") or "")
+                )
+        except ValueError:
+            detail = (response.text or "").strip()[:300]
+
+        hint = ""
+        if response.status_code in (401, 403):
+            hint = (
+                f" Check the key is a {self.provider.name} key: "
+                f"{self.provider.name} keys start with "
+                f"'{self.provider.key_prefix}'."
+            )
+        elif response.status_code == 400 and "model" in detail.lower():
+            hint = (
+                f" Model '{self.model}' may not be available on this account. "
+                "Set INTENTGUARD_LLM_MODEL to one that is."
+            )
+        return (
+            f"{self.provider.name} returned {response.status_code}"
+            f"{f': {detail}' if detail else ''}.{hint}"
+        )
 
     @staticmethod
     def _to_proposal(
@@ -371,15 +457,41 @@ class GrokPlanner:
         )
 
 
-def build_planner(*, api_key: str | None = None, model: str | None = None) -> Planner:
-    """Use Grok when a key is configured, otherwise the scripted planner."""
+def build_planner(
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+) -> Planner:
+    """Use a model when a key is configured, otherwise the scripted planner.
 
-    key = api_key if api_key is not None else os.getenv("XAI_API_KEY")
+    The provider is inferred from the key prefix so an xAI key and a Groq key
+    both just work. ``INTENTGUARD_LLM_PROVIDER`` overrides the inference.
+    """
+
+    key = api_key
+    if key is None:
+        for variable in (
+            "INTENTGUARD_LLM_API_KEY",
+            "XAI_API_KEY",
+            "GROQ_API_KEY",
+        ):
+            key = os.getenv(variable)
+            if key:
+                break
     if not key:
         return ScriptedPlanner()
-    return GrokPlanner(
+
+    chosen = provider or os.getenv("INTENTGUARD_LLM_PROVIDER")
+    resolved = (
+        PROVIDERS.get(chosen.lower())
+        if chosen and chosen.lower() in PROVIDERS
+        else provider_for_key(key)
+    )
+    return ChatCompletionsPlanner(
         api_key=key,
-        model=model or os.getenv("INTENTGUARD_GROK_MODEL", DEFAULT_GROK_MODEL),
+        provider=resolved,
+        model=model or os.getenv("INTENTGUARD_LLM_MODEL"),
     )
 
 
@@ -424,9 +536,23 @@ class GovernedAgent:
             customer_id=customer_id, agent_id=agent_id, now=now
         )
 
-        proposal = self.planner.propose(
-            message, intents=intents, history=history
-        )
+        try:
+            proposal = self.planner.propose(
+                message, intents=intents, history=history
+            )
+        except PlannerError as exc:
+            # Nothing is proposed, so nothing is authorized. Surface the reason
+            # instead of crashing the conversation.
+            turn = AgentTurn(
+                reply=(
+                    "I could not reach the language model, so I have not "
+                    f"proposed anything. {exc}"
+                ),
+                error=str(exc),
+            )
+            self._history.setdefault(key, []).append(turn)
+            return turn
+
         if proposal is None:
             turn = AgentTurn(reply=self._no_action_reply(intents))
         else:

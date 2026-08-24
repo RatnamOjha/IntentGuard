@@ -23,10 +23,11 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from intentguard import (  # noqa: E402
     AgentProfile,
+    ChatCompletionsPlanner,
     Decision,
     GovernedAgent,
-    GrokPlanner,
     IntentPassport,
+    PlannerError,
     PolicyEngine,
     ScriptedPlanner,
     build_planner,
@@ -348,7 +349,7 @@ class DenialMemoryTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HTTPX, "Install the api and dev extras to test the Grok planner")
-class GrokPlannerTest(unittest.TestCase):
+class ChatCompletionsPlannerTest(unittest.TestCase):
     """Drives the real request/response handling without touching the network."""
 
     def setUp(self) -> None:
@@ -357,9 +358,9 @@ class GrokPlannerTest(unittest.TestCase):
             customer_id="alice", agent_id=AGENT_ID, now=self.now
         )
 
-    def _planner(self, handler) -> GrokPlanner:  # noqa: ANN001
-        return GrokPlanner(
-            api_key="test-key", transport=httpx.MockTransport(handler)
+    def _planner(self, handler) -> ChatCompletionsPlanner:  # noqa: ANN001
+        return ChatCompletionsPlanner(
+            api_key="xai-test-key", transport=httpx.MockTransport(handler)
         )
 
     @staticmethod
@@ -423,7 +424,7 @@ class GrokPlannerTest(unittest.TestCase):
             "book a flight", intents=self.intents, history=()
         )
 
-        self.assertEqual("Bearer test-key", captured["auth"])
+        self.assertEqual("Bearer xai-test-key", captured["auth"])
         schema = captured["body"]["tools"][0]["function"]["parameters"]
         self.assertEqual(
             ["intent-flight"], schema["properties"]["intent_id"]["enum"]
@@ -503,14 +504,122 @@ class GrokPlannerTest(unittest.TestCase):
         self.assertIn("previously refused", system)
 
 
+@unittest.skipUnless(HTTPX, "Install the api and dev extras to test the planner")
+class PlannerFailureTest(unittest.TestCase):
+    """A provider error must be legible, and must never look like approval."""
+
+    def setUp(self) -> None:
+        self.engine, self.now = build()
+        self.intents = self.engine.list_intents(
+            customer_id="alice", agent_id=AGENT_ID, now=self.now
+        )
+
+    def _planner(self, response) -> ChatCompletionsPlanner:  # noqa: ANN001
+        return ChatCompletionsPlanner(
+            api_key="xai-test",
+            transport=httpx.MockTransport(lambda request: response),
+        )
+
+    def test_an_auth_error_names_the_expected_key_prefix(self) -> None:
+        planner = self._planner(
+            httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+        )
+
+        with self.assertRaises(PlannerError) as raised:
+            planner.propose("book it", intents=self.intents, history=())
+
+        message = str(raised.exception)
+        self.assertIn("401", message)
+        self.assertIn("Invalid API key", message)
+        self.assertIn("xai-", message)
+
+    def test_a_model_error_suggests_overriding_the_model(self) -> None:
+        planner = self._planner(
+            httpx.Response(
+                400, json={"error": {"message": "The model does not exist"}}
+            )
+        )
+
+        with self.assertRaises(PlannerError) as raised:
+            planner.propose("book it", intents=self.intents, history=())
+
+        self.assertIn("INTENTGUARD_LLM_MODEL", str(raised.exception))
+
+    def test_a_non_json_error_body_is_still_reported(self) -> None:
+        planner = self._planner(httpx.Response(500, text="upstream exploded"))
+
+        with self.assertRaises(PlannerError) as raised:
+            planner.propose("book it", intents=self.intents, history=())
+
+        self.assertIn("500", str(raised.exception))
+
+    def test_a_transport_failure_is_wrapped(self) -> None:
+        def explode(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("no route to host")
+
+        planner = ChatCompletionsPlanner(
+            api_key="xai-test", transport=httpx.MockTransport(explode)
+        )
+
+        with self.assertRaises(PlannerError) as raised:
+            planner.propose("book it", intents=self.intents, history=())
+
+        self.assertIn("Could not reach", str(raised.exception))
+
+    def test_the_conversation_survives_a_planner_failure(self) -> None:
+        """The REPL must not crash, and nothing may be authorized."""
+
+        planner = self._planner(
+            httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+        )
+        agent = GovernedAgent(self.engine, planner=planner)
+
+        turn = agent.send(
+            "book a flight for 50000",
+            customer_id="alice",
+            agent_id=AGENT_ID,
+            now=self.now,
+        )
+
+        self.assertIsNone(turn.decision)
+        self.assertIsNone(turn.proposal)
+        self.assertIsNone(turn.result)
+        self.assertIsNotNone(turn.error)
+        self.assertIn("401", turn.reply)
+        # Nothing reserved, nothing spent.
+        self.assertEqual(
+            [],
+            [
+                event
+                for event in self.engine.audit_ledger.events
+                if event.event_type == "budget.reserved"
+            ],
+        )
+
+
 class PlannerSelectionTest(unittest.TestCase):
     def test_no_key_selects_the_scripted_planner(self) -> None:
         self.assertIsInstance(build_planner(api_key=""), ScriptedPlanner)
 
-    def test_a_key_selects_grok(self) -> None:
+    def test_an_xai_key_selects_xai(self) -> None:
         planner = build_planner(api_key="xai-test", model="grok-4.6")
-        self.assertIsInstance(planner, GrokPlanner)
+        self.assertIsInstance(planner, ChatCompletionsPlanner)
+        self.assertEqual("xai", planner.provider.name)
+        self.assertEqual("https://api.x.ai/v1", planner.base_url)
         self.assertEqual("grok-4.6", planner.model)
+
+    def test_a_groq_key_selects_groq(self) -> None:
+        """gsk_ is Groq, not xAI. Sending it to api.x.ai returns an opaque 400."""
+
+        planner = build_planner(api_key="gsk_test")
+        self.assertIsInstance(planner, ChatCompletionsPlanner)
+        self.assertEqual("groq", planner.provider.name)
+        self.assertEqual("https://api.groq.com/openai/v1", planner.base_url)
+        self.assertEqual("llama-3.3-70b-versatile", planner.model)
+
+    def test_an_explicit_provider_overrides_the_key_prefix(self) -> None:
+        planner = build_planner(api_key="gsk_test", provider="xai")
+        self.assertEqual("xai", planner.provider.name)
 
 
 if __name__ == "__main__":

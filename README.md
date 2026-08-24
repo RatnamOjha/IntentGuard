@@ -92,9 +92,25 @@ Prompt injection can make the model propose anything. It cannot make the engine
 approve it, and `InjectedInstructionTest` in
 [`tests/test_agent.py`](tests/test_agent.py) holds that open.
 
-Set `XAI_API_KEY` to use xAI's Grok. Without it the agent falls back to a
-deterministic scripted planner, so a fresh clone demos end to end and CI runs
-the same governance path with no key and no network.
+Set an API key to use a real model. Two providers are supported and the right
+one is inferred from the key prefix, because their names are easy to confuse:
+
+| Provider | Key prefix | Endpoint | Default model |
+| --- | --- | --- | --- |
+| xAI (Grok) | `xai-` | `https://api.x.ai/v1` | `grok-4.6` |
+| Groq | `gsk_` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+
+```bash
+export XAI_API_KEY=xai-...     # or GROQ_API_KEY=gsk_...
+```
+
+Override with `INTENTGUARD_LLM_PROVIDER` and `INTENTGUARD_LLM_MODEL` if needed.
+Without any key the agent falls back to a deterministic scripted planner, so a
+fresh clone demos end to end and CI runs the same governance path with no key
+and no network.
+
+If the provider rejects the call, the agent reports the error and proposes
+nothing rather than failing open. No proposal means no authorization.
 
 ## Production architecture and current prototype
 
