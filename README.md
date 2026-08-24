@@ -59,6 +59,14 @@ A customer can talk to the agent instead of hand-crafting an action. The agent
 turns a message into a *proposed* action; it never decides anything. Every
 proposal goes through the same policy engine as any other request.
 
+Talk to it from a terminal, no server and no API key required:
+
+```bash
+PYTHONPATH=src .venv/bin/python examples/chat.py
+```
+
+Or over HTTP once the demo is running:
+
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/agent/message \
   -H 'Content-Type: application/json' \
@@ -294,6 +302,7 @@ Caveats worth reading before quoting any of this:
 │   ├── repo-metadata.md         # Repository description and topics
 │   └── threat-model.md          # Defences, non-defences, trust boundaries
 ├── examples/
+│   ├── chat.py                  # Interactive governed-agent REPL
 │   └── demo.py                  # Four-scenario worked example
 ├── prototype/                   # Operator console (React, Next.js, vinext)
 │   ├── app/                     # layout.tsx, page.tsx, globals.css
