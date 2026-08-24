@@ -396,13 +396,3 @@ Still outstanding:
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
-
-## Hackathon alignment
-
-IntentGuard targets the **Governance Layer for Financial Agents** theme in
-[American Express CodeStreet 2026](https://www.hackerearth.com/community/challenges/hackathon/codestreet-2026/).
-
-Its design is also aligned with American Express's public direction around
-verified agents, intent intelligence, spend controls, and trusted agentic
-commerce through the
-[ACE developer kit](https://www.americanexpress.com/en-us/company/agentic-commerce/).
