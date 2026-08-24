@@ -202,6 +202,35 @@ class PolicyEngine:
                 )
             return tuple(states)
 
+    def list_intents(
+        self,
+        *,
+        customer_id: str | None = None,
+        agent_id: str | None = None,
+        now: datetime | None = None,
+        include_expired: bool = False,
+    ) -> tuple[IntentPassport, ...]:
+        """Return registered intents, filtered and ordered deterministically.
+
+        Callers acting on behalf of an authenticated customer should always pass
+        ``customer_id`` so they only ever see that customer's authorizations.
+        """
+
+        moment = now or datetime.now(timezone.utc)
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        intent
+                        for intent in self._intents.values()
+                        if (customer_id is None or intent.customer_id == customer_id)
+                        and (agent_id is None or intent.agent_id == agent_id)
+                        and (include_expired or not intent.is_expired(moment))
+                    ),
+                    key=lambda intent: intent.intent_id,
+                )
+            )
+
     def list_approvals(self) -> tuple[HumanApproval, ...]:
         """Return newest human-review requests first."""
 

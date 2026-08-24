@@ -13,6 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .agent import GovernedAgent, build_planner
 from .benchmark import api_probe_request, create_api_probe_engine, run_benchmark
 from .models import ActionRequest, AgentProfile, IntentPassport
 from .policy_engine import PolicyEngine
@@ -97,6 +98,15 @@ class ApprovalResolution(BaseModel):
 
 class BenchmarkProbe(BaseModel):
     request_id: str = Field(min_length=1, max_length=128)
+
+
+class AgentMessage(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    agent_id: str = Field(min_length=1, max_length=100)
+    # TODO(auth): this must come from a verified Firebase ID token, not the
+    # request body. Until it does, a caller can claim to be any customer, which
+    # is the "self-asserted customer identity" entry in docs/threat-model.md.
+    customer_id: str = Field(min_length=1, max_length=100)
 
 
 def seed_demo_engine(engine: PolicyEngine) -> None:
@@ -266,6 +276,7 @@ def create_app(
     app.state.engine = engine or PolicyEngine()
     app.state.benchmark_probe_engine = create_api_probe_engine()
     app.state.demo_bootstrapped = False
+    app.state.agent = GovernedAgent(app.state.engine, planner=build_planner())
 
     def governance_engine() -> PolicyEngine:
         return app.state.engine
@@ -551,6 +562,43 @@ def create_app(
             "first_invalid_link": ledger.first_invalid_link(),
         }
 
+    @app.get("/v1/agent/intents", tags=["agent"])
+    def agent_intents(customer_id: str, agent_id: str) -> list[dict[str, Any]]:
+        """The authorizations this customer has granted this agent."""
+
+        return jsonable_encoder(
+            governance_engine().list_intents(
+                customer_id=customer_id, agent_id=agent_id
+            )
+        )
+
+    @app.post("/v1/agent/message", tags=["agent"])
+    def agent_message(payload: AgentMessage) -> dict[str, Any]:
+        """Send one customer message to the governed agent.
+
+        The agent proposes; the policy engine decides. Identity is taken from
+        the request rather than from anything the model returns.
+        """
+
+        conversation: GovernedAgent = app.state.agent
+        turn = conversation.send(
+            payload.message,
+            customer_id=payload.customer_id,
+            agent_id=payload.agent_id,
+        )
+        return jsonable_encoder(
+            {
+                "reply": turn.reply,
+                "planner": conversation.planner.name,
+                "decision": (
+                    turn.decision.value if turn.decision is not None else None
+                ),
+                "blocked_reasons": list(turn.blocked_reasons),
+                "proposal": turn.proposal,
+                "authorization": turn.result,
+            }
+        )
+
     @app.post("/v1/demo/bootstrap", tags=["demo"])
     def bootstrap_demo() -> dict[str, Any]:
         if not app.state.demo_bootstrapped:
@@ -570,6 +618,9 @@ def create_app(
     def reset_demo() -> dict[str, Any]:
         app.state.engine = PolicyEngine()
         app.state.demo_bootstrapped = False
+        app.state.agent = GovernedAgent(
+            app.state.engine, planner=build_planner()
+        )
         return bootstrap_demo()
 
     @app.get("/v1/demo/benchmark", tags=["demo", "operations"])

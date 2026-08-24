@@ -53,6 +53,41 @@ fleet-epoch bypass, self-reported risk, cross-customer intent reuse,
 and audit-chain tampering. The limits of what any of it
 covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
 
+## Conversational agent
+
+A customer can talk to the agent instead of hand-crafting an action. The agent
+turns a message into a *proposed* action; it never decides anything. Every
+proposal goes through the same policy engine as any other request.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/agent/message \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"book a non-refundable hotel for 9000",
+       "customer_id":"demo-customer","agent_id":"agt_travel_01"}'
+```
+
+```
+DENY - IntentGuard refused book hotel for 9000 INR. The request violates the
+authorized 'refundable' constraint: expected True, received False.
+```
+
+The model sits on the untrusted side of the boundary, deliberately:
+
+- `agent_id` and `customer_id` come from the caller, never from model output.
+- The model may only cite intents that already belong to that customer. The
+  tool schema constrains it to those ids and the proposal is re-checked before
+  the engine sees it.
+- A declared `risk_score` can only raise the effective risk, never lower it.
+- Malformed model output is dropped rather than guessed at.
+
+Prompt injection can make the model propose anything. It cannot make the engine
+approve it, and `InjectedInstructionTest` in
+[`tests/test_agent.py`](tests/test_agent.py) holds that open.
+
+Set `XAI_API_KEY` to use xAI's Grok. Without it the agent falls back to a
+deterministic scripted planner, so a fresh clone demos end to end and CI runs
+the same governance path with no key and no network.
+
 ## Production architecture and current prototype
 
 The listed challenge technologies are examples rather than requirements. We are
@@ -275,6 +310,7 @@ Caveats worth reading before quoting any of this:
 ├── src/
 │   └── intentguard/
 │       ├── __init__.py          # Public package surface
+│       ├── agent.py              # Grok-backed agent, scripted fallback
 │       ├── api.py               # FastAPI governance gateway
 │       ├── audit.py             # Hash-chained audit ledger
 │       ├── benchmark.py         # Acceptance, latency, and race evidence
@@ -282,6 +318,7 @@ Caveats worth reading before quoting any of this:
 │       └── policy_engine.py     # Runtime policy evaluation
 └── tests/
     ├── test_adversarial.py      # Eight attack classes against the real engine
+    ├── test_agent.py            # Governed agent, including prompt injection
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py
