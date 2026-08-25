@@ -14,6 +14,10 @@ api = [
     "fastapi==0.140.0",
     "uvicorn[standard]==0.51.0",
 ]
+postgres = [
+    "psycopg[binary]==3.2.3",
+    "psycopg-pool==3.2.4",
+]
 agent = [
     # Only needed for the Grok-backed planner. Without it the agent falls back
     # to the scripted planner, which has no dependencies.

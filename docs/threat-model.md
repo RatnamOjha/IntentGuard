@@ -58,9 +58,12 @@ Blunt list. None of these are mitigated today.
 - **Unsigned intent.** `IntentPassport` is registered over the open API and
   stored as a plain object. "Authenticated customer intent" means intent that
   was registered, not intent that is cryptographically bound to a customer.
-- **More than one process.** The concurrency guarantee comes from an in-process
-  lock. Two replicas share no state, so budgets, revocations, and the fleet
-  stop are per-process. Horizontal scale would need the roadmap Redis.
+- **More than one process.** The engine's concurrency guarantee still comes
+  from an in-process lock, so budgets, revocations and the fleet stop remain
+  per-process. `intentguard.budget.PostgresBudgetLedger` fixes this for budgets
+  specifically and is tested across real replicas, but the engine has not been
+  moved onto it yet. Revocation and fleet state have no durable equivalent at
+  all.
 - **Restarts.** All state is lost on exit. Budgets reset, revocations are
   forgotten, and the audit chain restarts at genesis.
 - **Resource exhaustion.** Authorizations, reservations, leases, spend keys,

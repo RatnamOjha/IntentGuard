@@ -53,6 +53,50 @@ fleet-epoch bypass, self-reported risk, cross-customer intent reuse,
 and audit-chain tampering. The limits of what any of it
 covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
 
+## Durable budget ledger
+
+The policy engine holds its state in memory, guarded by an in-process lock.
+That is correct in one process and wrong in two: each replica keeps its own
+spend counters, so N replicas permit N times the cap.
+
+[`src/intentguard/budget.py`](src/intentguard/budget.py) moves that invariant
+into Postgres, where every replica shares it:
+
+```
+committed + reserved + amount <= daily_budget
+```
+
+The check and the write are one statement, so there is no read-modify-write
+window for replicas to race through. Under `READ COMMITTED`, a writer blocked
+on a contended row re-evaluates the condition against the winner's committed
+value and matches zero rows — which is the refusal we want.
+
+```bash
+createdb intentguard
+psql -d intentguard -f migrations/0001_budget_ledger.sql
+export INTENTGUARD_DATABASE_URL=postgresql:///intentguard
+```
+
+Two implementations satisfy one protocol, and the same contract tests run
+against both: `InMemoryBudgetLedger` for single-process runs, and
+`PostgresBudgetLedger` for anything with more than one replica.
+
+[`tests/test_budget_ledger.py`](tests/test_budget_ledger.py) proves the
+difference with real OS processes rather than threads, because no thread-based
+test can show a cross-process bug:
+
+| Test | Result |
+| --- | --- |
+| 8 replicas, per-process in-memory ledger | Cap **breached** — 12,000 against 10,000, as expected |
+| 8 replicas, shared Postgres ledger | Cap held — exactly 9,000 reserved, over 12 repeated races |
+
+The suite skips the Postgres tests when no database is reachable, so a clone
+with no Postgres still runs everything else.
+
+**Not yet wired in.** `PolicyEngine` still uses its own in-memory counters. The
+ledger is proven correct on its own; moving the engine onto it is the next
+step, and until that lands the engine remains single-process.
+
 ## Conversational agent
 
 A customer can talk to the agent instead of hand-crafting an action. The agent
@@ -131,7 +175,7 @@ the prototype does not overstate its implementation.
 | Operator UI | React 19, TypeScript, Next.js 16 on Vite | Policies, budgets, fleet controls, activity, and audit review |
 | Governance API | FastAPI, Python | Enforcement gateway and operator APIs |
 | Policy decisions | Open Policy Agent, Rego | Granular permission and contextual policy evaluation |
-| Durable state | PostgreSQL | Agents, policies, budgets, approvals, and audit metadata |
+| Durable state | PostgreSQL | Agents, policies, budgets, approvals, and audit metadata. The budget ledger is implemented; the rest is roadmap |
 | Runtime state | Redis | Atomic reservations, counters, revocation epochs, and fleet-stop state |
 | Monitoring | Prometheus, Grafana | Latency, decisions, policy failures, and fleet health |
 | Enterprise export | Splunk-compatible HTTP event export | Optional downstream security and audit integration |
@@ -346,6 +390,7 @@ Caveats worth reading before quoting any of this:
 │       ├── api.py               # FastAPI governance gateway
 │       ├── config.py            # .env loading, stdlib only
 │       ├── audit.py             # Hash-chained audit ledger
+│       ├── budget.py            # Durable budget ledger (in-memory + Postgres)
 │       ├── benchmark.py         # Acceptance, latency, and race evidence
 │       ├── models.py            # Domain models
 │       └── policy_engine.py     # Runtime policy evaluation
@@ -355,6 +400,7 @@ Caveats worth reading before quoting any of this:
     ├── test_api.py
     ├── test_authorization_flow.py
     ├── test_benchmark.py
+    ├── test_budget_ledger.py
     ├── test_config.py
     └── test_policy_engine.py
 ```
