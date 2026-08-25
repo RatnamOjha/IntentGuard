@@ -55,9 +55,9 @@ covers are written down in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Durable budget ledger
 
-The policy engine holds its state in memory, guarded by an in-process lock.
-That is correct in one process and wrong in two: each replica keeps its own
-spend counters, so N replicas permit N times the cap.
+The daily cap used to be guarded by an in-process lock. That is correct in one
+process and wrong in two: each replica keeps its own spend counters, so N
+replicas permit N times the cap.
 
 [`src/intentguard/budget.py`](src/intentguard/budget.py) moves that invariant
 into Postgres, where every replica shares it:
@@ -77,6 +77,16 @@ psql -d intentguard -f migrations/0001_budget_ledger.sql
 export INTENTGUARD_DATABASE_URL=postgresql:///intentguard
 ```
 
+`PolicyEngine` performs all budget accounting through this ledger. Pass one in
+to share a cap across replicas; the in-memory default keeps single-process runs
+working with no database:
+
+```python
+engine = PolicyEngine(
+    budget_ledger=PostgresBudgetLedger(os.environ["INTENTGUARD_DATABASE_URL"])
+)
+```
+
 Two implementations satisfy one protocol, and the same contract tests run
 against both: `InMemoryBudgetLedger` for single-process runs, and
 `PostgresBudgetLedger` for anything with more than one replica.
@@ -89,13 +99,17 @@ test can show a cross-process bug:
 | --- | --- |
 | 8 replicas, per-process in-memory ledger | Cap **breached** — 12,000 against 10,000, as expected |
 | 8 replicas, shared Postgres ledger | Cap held — exactly 9,000 reserved, over 12 repeated races |
+| 8 replicas, full `PolicyEngine` each, shared ledger | Cap held — exactly 9,000 committed, losers denied cleanly |
 
 The suite skips the Postgres tests when no database is reachable, so a clone
 with no Postgres still runs everything else.
 
-**Not yet wired in.** `PolicyEngine` still uses its own in-memory counters. The
-ledger is proven correct on its own; moving the engine onto it is the next
-step, and until that lands the engine remains single-process.
+**What this does and does not cover.** Budget enforcement is multi-replica
+safe: two engines sharing a ledger agree on remaining headroom, and a hold
+taken on one is visible to the other. Everything else in the engine is still
+per-process — leases, approvals, revocation, fleet-stop state, request
+idempotency, the audit chain, and the velocity signal feeding risk. A lease
+issued by one replica cannot be committed by another.
 
 ## Conversational agent
 

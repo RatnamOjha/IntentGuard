@@ -151,12 +151,50 @@ class LedgerContractMixin:
 
     def test_expiry_reclaims_abandoned_holds(self) -> None:
         ledger = self.make_ledger()
-        self._reserve(ledger, "6000", expires_in=-1)
+        reservation_id = self._reserve(ledger, "6000", expires_in=-1)
 
-        self.assertEqual(1, ledger.expire_due(now=NOW))
+        reclaimed = ledger.expire_due(now=NOW)
+
+        self.assertEqual([reservation_id], [r.reservation_id for r in reclaimed])
+        self.assertEqual(["expired"], [r.status for r in reclaimed])
         self.assertEqual(Decimal("10000"), ledger.exposure(AGENT, DAY).remaining)
         # Idempotent: a second sweep finds nothing left to reclaim.
-        self.assertEqual(0, ledger.expire_due(now=NOW))
+        self.assertEqual((), ledger.expire_due(now=NOW))
+
+    def test_a_reservation_can_be_read_back(self) -> None:
+        """The engine reads status from here, so it must be accurate."""
+
+        ledger = self.make_ledger()
+        reservation_id = self._reserve(ledger, "6000")
+
+        record = ledger.get(reservation_id)
+        assert record is not None
+        self.assertEqual(AGENT, record.agent_id)
+        self.assertEqual(Decimal("6000"), record.amount)
+        self.assertEqual("INR", record.currency)
+        self.assertEqual(DAY, record.budget_date)
+        self.assertTrue(record.held)
+
+        ledger.commit(reservation_id, now=NOW)
+        committed = ledger.get(reservation_id)
+        assert committed is not None
+        self.assertEqual("committed", committed.status)
+        self.assertFalse(committed.held)
+
+        self.assertIsNone(ledger.get("res_does_not_exist"))
+
+    def test_outstanding_holds_can_be_listed(self) -> None:
+        """Revocation and the fleet stop need to find work in flight."""
+
+        ledger = self.make_ledger()
+        first = self._reserve(ledger, "1000")
+        second = self._reserve(ledger, "1000")
+        ledger.commit(first, now=NOW)
+
+        outstanding = ledger.held()
+        self.assertEqual([second], [r.reservation_id for r in outstanding])
+        self.assertEqual(outstanding, ledger.held(AGENT))
+        self.assertEqual((), ledger.held("a-different-agent"))
 
     def test_an_unknown_agent_is_rejected(self) -> None:
         ledger = self.make_ledger()
@@ -241,6 +279,75 @@ def _postgres_worker(barrier, results, database_url: str) -> None:  # noqa: ANN0
             results.append(Decimal(AMOUNT))
         except BudgetExceeded:
             pass
+    finally:
+        ledger.close()
+
+
+def _engine_worker(barrier, results, database_url: str) -> None:  # noqa: ANN001
+    """A whole PolicyEngine replica, sharing only the budget ledger.
+
+    Each process keeps its own agents, intents, leases and locks -- exactly how
+    two API replicas would run. Only the cap is shared.
+    """
+
+    from intentguard import (
+        ActionRequest,
+        AgentProfile,
+        Decision,
+        IntentPassport,
+        PolicyEngine,
+    )
+    from intentguard.budget import PostgresBudgetLedger
+
+    ledger = PostgresBudgetLedger(database_url)
+    try:
+        engine = PolicyEngine(budget_ledger=ledger)
+        engine.register_agent(
+            AgentProfile(
+                agent_id=AGENT,
+                name="Ledger Agent",
+                allowed_actions=frozenset({"book_flight"}),
+                max_action_amount=Decimal("50000"),
+                daily_budget=Decimal(CAP),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                intent_id="intent-race",
+                customer_id="customer-race",
+                agent_id=AGENT,
+                action="book_flight",
+                max_amount=Decimal("50000"),
+                currency="INR",
+                expires_at=NOW + timedelta(hours=2),
+            )
+        )
+        request = ActionRequest(
+            request_id=f"req_{os.getpid()}_{uuid.uuid4().hex}",
+            agent_id=AGENT,
+            action="book_flight",
+            amount=Decimal(AMOUNT),
+            currency="INR",
+            intent_id="intent-race",
+            risk_score=0,
+            attributes={},
+        )
+
+        barrier.wait()
+
+        result = engine.authorize_action(
+            request, now=NOW, lease_ttl=timedelta(minutes=5)
+        )
+        if result.decision.decision is not Decision.ALLOW:
+            return
+        assert result.reservation is not None and result.lease is not None
+        # Commit too, so the test bounds real spend rather than just holds.
+        engine.commit_reservation(
+            result.reservation.reservation_id,
+            lease_id=result.lease.lease_id,
+            now=NOW,
+        )
+        results.append(result.reservation.amount)
     finally:
         ledger.close()
 
@@ -376,6 +483,99 @@ class PostgresConcurrencyTest(unittest.TestCase):
                 exposure = self.ledger.exposure(AGENT, DAY)
                 self.assertLessEqual(exposure.reserved, Decimal(CAP))
                 self.assertEqual(Decimal("9000"), exposure.reserved)
+
+
+@unittest.skipUnless(
+    HAS_POSTGRES, f"Postgres not reachable at {DATABASE_URL}; run migrations first"
+)
+class PolicyEngineConcurrencyTest(unittest.TestCase):
+    """Enforcement through the engine, across replicas -- not just the ledger.
+
+    The standalone ledger test proves the SQL is right. This proves the engine
+    actually routes through it, which is the claim the README makes.
+    """
+
+    ITERATIONS = 8
+
+    def setUp(self) -> None:
+        from intentguard.budget import PostgresBudgetLedger
+
+        _truncate()
+        self.ledger = PostgresBudgetLedger(DATABASE_URL)
+        self.addCleanup(self.ledger.close)
+
+    def _race(self) -> Decimal:
+        context = mp.get_context("spawn")
+        with context.Manager() as manager:
+            results = manager.list()
+            barrier = manager.Barrier(WORKERS)
+            processes = [
+                context.Process(
+                    target=_engine_worker, args=(barrier, results, DATABASE_URL)
+                )
+                for _ in range(WORKERS)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=60)
+            for process in processes:
+                self.assertEqual(0, process.exitcode, "A replica crashed.")
+            return sum(results, Decimal("0"))
+
+    def test_replicas_cannot_collectively_overspend(self) -> None:
+        granted = self._race()
+        exposure = self.ledger.exposure(AGENT, DAY)
+
+        self.assertLessEqual(
+            exposure.committed,
+            Decimal(CAP),
+            f"Replicas committed {exposure.committed} against a cap of {CAP}.",
+        )
+        self.assertFalse(exposure.breached)
+        # Everything granted was committed, and nothing is left dangling.
+        self.assertEqual(granted, exposure.committed)
+        self.assertEqual(Decimal("0"), exposure.reserved)
+        # 10000 / 1500 leaves room for exactly six.
+        self.assertEqual(Decimal("9000"), exposure.committed)
+
+    def test_losers_are_denied_rather_than_erroring(self) -> None:
+        """Losing the race for headroom is an ordinary denial, not a crash."""
+
+        self._race()
+
+        # Every replica exited cleanly, asserted in _race. The two that lost
+        # got DENY, so the ledger holds six commits and no stray holds.
+        exposure = self.ledger.exposure(AGENT, DAY)
+        self.assertEqual(Decimal("0"), exposure.reserved)
+        self.assertEqual(
+            6,
+            len(
+                [
+                    reservation
+                    for reservation in _all_reservations()
+                    if reservation[1] == "committed"
+                ]
+            ),
+        )
+
+    def test_the_race_is_stable_across_repeats(self) -> None:
+        for iteration in range(self.ITERATIONS):
+            with self.subTest(iteration=iteration):
+                _truncate()
+                self._race()
+                exposure = self.ledger.exposure(AGENT, DAY)
+                self.assertEqual(Decimal("9000"), exposure.committed)
+                self.assertFalse(exposure.breached)
+
+
+def _all_reservations() -> list[tuple[str, str]]:
+    import psycopg
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        return connection.execute(
+            "SELECT reservation_id, status FROM reservations"
+        ).fetchall()
 
 
 if __name__ == "__main__":

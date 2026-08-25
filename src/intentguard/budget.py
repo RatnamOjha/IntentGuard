@@ -22,7 +22,7 @@ they do not share.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from threading import RLock
@@ -44,6 +44,29 @@ class BudgetExceeded(Exception):
 
 class UnknownAgent(KeyError):
     """No such agent in the ledger."""
+
+
+@dataclass(frozen=True)
+class LedgerReservation:
+    """A hold as the ledger records it.
+
+    The engine reads reservation state from here rather than keeping its own
+    copy, so status cannot drift between the two and a replica can resolve a
+    hold another replica created.
+    """
+
+    reservation_id: str
+    request_id: str
+    agent_id: str
+    amount: Decimal
+    currency: str
+    budget_date: date
+    status: str
+    expires_at: datetime
+
+    @property
+    def held(self) -> bool:
+        return self.status == "held"
 
 
 @dataclass(frozen=True)
@@ -98,8 +121,14 @@ class BudgetLedger(Protocol):
 
     def release(self, reservation_id: str, *, now: datetime, reason: str) -> Exposure: ...
 
-    def expire_due(self, *, now: datetime) -> int:
-        """Release every hold past its expiry. Returns how many were reclaimed."""
+    def expire_due(self, *, now: datetime) -> tuple[LedgerReservation, ...]:
+        """Release every hold past its expiry, returning what was reclaimed."""
+        ...
+
+    def get(self, reservation_id: str) -> LedgerReservation | None: ...
+
+    def held(self, agent_id: str | None = None) -> tuple[LedgerReservation, ...]:
+        """Every hold still outstanding, optionally for one agent."""
         ...
 
     def exposure(self, agent_id: str, budget_date: date) -> Exposure: ...
@@ -210,16 +239,49 @@ class InMemoryBudgetLedger:
     ) -> Exposure:
         return self._resolve(reservation_id, status="released", now=now)
 
-    def expire_due(self, *, now: datetime) -> int:
+    def expire_due(self, *, now: datetime) -> tuple[LedgerReservation, ...]:
         with self._lock:
             due = [
                 reservation_id
                 for reservation_id, record in self._reservations.items()
                 if record["status"] == "held" and now >= record["expires_at"]
             ]
+            reclaimed = []
             for reservation_id in due:
+                snapshot = self._to_reservation(reservation_id)
+                assert snapshot is not None
                 self._resolve(reservation_id, status="expired", now=now)
-            return len(due)
+                reclaimed.append(replace(snapshot, status="expired"))
+            return tuple(reclaimed)
+
+    def _to_reservation(self, reservation_id: str) -> LedgerReservation | None:
+        record = self._reservations.get(reservation_id)
+        if record is None:
+            return None
+        return LedgerReservation(
+            reservation_id=reservation_id,
+            request_id=record["request_id"],
+            agent_id=record["agent_id"],
+            amount=record["amount"],
+            currency=record["currency"],
+            budget_date=record["budget_date"],
+            status=record["status"],
+            expires_at=record["expires_at"],
+        )
+
+    def get(self, reservation_id: str) -> LedgerReservation | None:
+        with self._lock:
+            return self._to_reservation(reservation_id)
+
+    def held(self, agent_id: str | None = None) -> tuple[LedgerReservation, ...]:
+        with self._lock:
+            return tuple(
+                reservation
+                for reservation_id in tuple(self._reservations)
+                if (reservation := self._to_reservation(reservation_id)) is not None
+                and reservation.held
+                and (agent_id is None or reservation.agent_id == agent_id)
+            )
 
     def exposure(self, agent_id: str, budget_date: date) -> Exposure:
         with self._lock:
@@ -285,6 +347,25 @@ UPDATE budget_days AS b
  WHERE b.agent_id = claimed.agent_id AND b.budget_date = claimed.budget_date
 RETURNING b.committed, b.reserved
 """
+
+
+_RESERVATION_COLUMNS = (
+    "reservation_id, request_id, agent_id, amount, currency, "
+    "budget_date, status, expires_at"
+)
+
+
+def _row_to_reservation(row: Any) -> LedgerReservation:
+    return LedgerReservation(
+        reservation_id=row[0],
+        request_id=row[1],
+        agent_id=row[2],
+        amount=row[3],
+        currency=row[4],
+        budget_date=row[5],
+        status=row[6],
+        expires_at=row[7],
+    )
 
 
 class PostgresBudgetLedger:
@@ -438,11 +519,12 @@ class PostgresBudgetLedger:
     ) -> Exposure:
         return self._resolve(reservation_id, status="released", now=now)
 
-    def expire_due(self, *, now: datetime) -> int:
+    def expire_due(self, *, now: datetime) -> tuple[LedgerReservation, ...]:
         """Reclaim holds past their expiry.
 
         Safe to run concurrently on every replica: the UPDATE claims rows by
-        flipping their status, so a reservation can only be reclaimed once.
+        flipping their status, so a reservation is reclaimed exactly once even
+        if every replica sweeps at the same moment.
         """
 
         with self._pool.connection() as connection:
@@ -456,18 +538,38 @@ class PostgresBudgetLedger:
                           WHERE status = 'held' AND expires_at <= %(now)s
                           FOR UPDATE SKIP LOCKED
                      )
-                    RETURNING agent_id, budget_date, amount
+                    RETURNING reservation_id, request_id, agent_id, amount,
+                              currency, budget_date, status, expires_at
                     """,
                     {"now": now},
                 ).fetchall()
 
-                for agent_id, budget_date, amount in claimed:
+                for row in claimed:
                     connection.execute(
                         "UPDATE budget_days SET reserved = reserved - %s "
                         "WHERE agent_id = %s AND budget_date = %s",
-                        (amount, agent_id, budget_date),
+                        (row[3], row[2], row[5]),
                     )
-        return len(claimed)
+        return tuple(_row_to_reservation(row) for row in claimed)
+
+    def get(self, reservation_id: str) -> LedgerReservation | None:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                f"SELECT {_RESERVATION_COLUMNS} FROM reservations "
+                "WHERE reservation_id = %s",
+                (reservation_id,),
+            ).fetchone()
+        return _row_to_reservation(row) if row is not None else None
+
+    def held(self, agent_id: str | None = None) -> tuple[LedgerReservation, ...]:
+        clause = "" if agent_id is None else " AND agent_id = %(agent_id)s"
+        with self._pool.connection() as connection:
+            rows = connection.execute(
+                f"SELECT {_RESERVATION_COLUMNS} FROM reservations "
+                f"WHERE status = 'held'{clause} ORDER BY created_at",
+                {"agent_id": agent_id},
+            ).fetchall()
+        return tuple(_row_to_reservation(row) for row in rows)
 
     def exposure(self, agent_id: str, budget_date: date) -> Exposure:
         with self._pool.connection() as connection:

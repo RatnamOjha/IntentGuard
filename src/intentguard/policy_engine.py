@@ -11,6 +11,12 @@ from typing import Any
 from uuid import uuid4
 
 from .audit import AuditLedger
+from .budget import (
+    BudgetExceeded,
+    BudgetLedger,
+    InMemoryBudgetLedger,
+    LedgerReservation,
+)
 from .models import (
     ActionRequest,
     AgentProfile,
@@ -50,6 +56,7 @@ class PolicyEngine:
         policy_version: str = "2026.07",
         review_risk_threshold: int = 70,
         audit_ledger: AuditLedger | None = None,
+        budget_ledger: BudgetLedger | None = None,
     ) -> None:
         self.policy_version = policy_version
         self._policy_revision = 0
@@ -58,13 +65,9 @@ class PolicyEngine:
         self._agents: dict[str, AgentProfile] = {}
         self._intents: dict[str, IntentPassport] = {}
         self._revoked_agents: set[str] = set()
-        self._daily_spend: dict[tuple[str, date], Decimal] = defaultdict(
-            lambda: Decimal("0")
-        )
-        self._reserved_spend: dict[tuple[str, date], Decimal] = defaultdict(
-            lambda: Decimal("0")
-        )
-        self._reservations: dict[str, BudgetReservation] = {}
+        # All budget accounting lives here. Pass a PostgresBudgetLedger to make
+        # the cap hold across replicas; the in-memory default is single-process.
+        self.budget_ledger: BudgetLedger = budget_ledger or InMemoryBudgetLedger()
         self._authorization_counts: dict[tuple[str, date], int] = defaultdict(int)
         self._leases: dict[str, AuthorizationLease] = {}
         self._authorizations: dict[
@@ -88,6 +91,7 @@ class PolicyEngine:
     def register_agent(self, agent: AgentProfile) -> None:
         with self._lock:
             self._agents[agent.agent_id] = agent
+            self._sync_agent_unlocked(agent)
             self.audit_ledger.append(
                 "agent.registered",
                 {"agent_id": agent.agent_id, "name": agent.name},
@@ -129,9 +133,8 @@ class PolicyEngine:
             if current is None:
                 raise KeyError(f"Unknown agent: {agent_id}")
             today = (now or datetime.now(timezone.utc)).date()
-            committed = self._daily_spend[(agent_id, today)]
-            reserved = self._reserved_spend[(agent_id, today)]
-            if daily_budget < committed + reserved:
+            exposure = self.budget_ledger.exposure(agent_id, today)
+            if daily_budget < exposure.committed + exposure.reserved:
                 raise ValueError(
                     "The daily budget cannot be lower than today's committed "
                     "and reserved exposure."
@@ -145,6 +148,7 @@ class PolicyEngine:
                 active=active,
             )
             self._agents[agent_id] = updated
+            self._sync_agent_unlocked(updated)
             self._policy_revision += 1
             self.policy_version = f"2026.07.r{self._policy_revision}"
             self.audit_ledger.append(
@@ -180,9 +184,11 @@ class PolicyEngine:
             self._expire_reservations_unlocked(snapshot_time)
             states: list[dict[str, Any]] = []
             for agent in sorted(self._agents.values(), key=lambda item: item.agent_id):
-                key = (agent.agent_id, snapshot_time.date())
-                spent = self._daily_spend[key]
-                reserved = self._reserved_spend[key]
+                exposure = self.budget_ledger.exposure(
+                    agent.agent_id, snapshot_time.date()
+                )
+                spent = exposure.committed
+                reserved = exposure.reserved
                 states.append(
                     {
                         "agent_id": agent.agent_id,
@@ -247,16 +253,10 @@ class PolicyEngine:
         with self._lock:
             self._revoked_agents.add(agent_id)
             self.audit_ledger.append("agent.revoked", {"agent_id": agent_id})
-            for reservation in tuple(self._reservations.values()):
-                if (
-                    reservation.agent_id == agent_id
-                    and reservation.status is ReservationStatus.HELD
-                ):
-                    self._release_reservation_unlocked(
-                        reservation,
-                        status=ReservationStatus.RELEASED,
-                        reason="agent_revoked",
-                    )
+            for reservation in self.budget_ledger.held(agent_id):
+                self._release_reservation_unlocked(
+                    reservation, reason="agent_revoked"
+                )
 
     def restore_agent(self, agent_id: str) -> None:
         """Remove an agent's runtime revocation without changing its profile."""
@@ -279,13 +279,10 @@ class PolicyEngine:
                 "fleet.stopped",
                 {"reason": reason, "fleet_epoch": self._fleet_epoch},
             )
-            for reservation in tuple(self._reservations.values()):
-                if reservation.status is ReservationStatus.HELD:
-                    self._release_reservation_unlocked(
-                        reservation,
-                        status=ReservationStatus.RELEASED,
-                        reason="fleet_stopped",
-                    )
+            for reservation in self.budget_ledger.held():
+                self._release_reservation_unlocked(
+                    reservation, reason="fleet_stopped"
+                )
 
     def resume_fleet(self) -> None:
         with self._lock:
@@ -406,12 +403,12 @@ class PolicyEngine:
             )
             self._check_required_attributes(findings, intent, request)
 
-        spent_today = (
-            self._daily_spend[(request.agent_id, evaluation_time.date())]
-            + self._reserved_spend[(request.agent_id, evaluation_time.date())]
-            if agent is not None
-            else Decimal("0")
-        )
+        spent_today = Decimal("0")
+        if agent is not None:
+            exposure = self.budget_ledger.exposure(
+                request.agent_id, evaluation_time.date()
+            )
+            spent_today = exposure.committed + exposure.reserved
         remaining_budget = (
             max(agent.daily_budget - spent_today, Decimal("0"))
             if agent is not None
@@ -539,13 +536,14 @@ class PolicyEngine:
                         "The request ID was already used with different action data."
                     )
                 if previous_result.reservation is not None:
-                    current_reservation = self._reservations[
+                    current_reservation = self._reservation_snapshot_unlocked(
                         previous_result.reservation.reservation_id
-                    ]
-                    previous_result = replace(
-                        previous_result,
-                        reservation=current_reservation,
                     )
+                    if current_reservation is not None:
+                        previous_result = replace(
+                            previous_result,
+                            reservation=current_reservation,
+                        )
                     self._authorizations[request.request_id] = (
                         previous_request,
                         previous_result,
@@ -740,15 +738,31 @@ class PolicyEngine:
         """Reserve budget and issue a lease while the engine lock is held."""
 
         expires_at = evaluation_time + lease_ttl
+        budget_date = evaluation_time.date()
         reservation = BudgetReservation(
             reservation_id=f"res_{uuid4().hex}",
             request_id=request.request_id,
             agent_id=request.agent_id,
             amount=request.amount,
             currency=request.currency,
-            budget_date=evaluation_time.date(),
+            budget_date=budget_date,
             expires_at=expires_at,
         )
+        # The ledger is the authority on the cap. Evaluation already checked
+        # headroom, but between that read and this write another replica may
+        # have taken it, so a refusal here is expected rather than exceptional.
+        try:
+            self.budget_ledger.reserve(
+                reservation.reservation_id,
+                request_id=request.request_id,
+                agent_id=request.agent_id,
+                amount=request.amount,
+                currency=request.currency,
+                budget_date=budget_date,
+                expires_at=expires_at,
+            )
+        except BudgetExceeded:
+            return self._deny_for_budget_unlocked(request, decision)
         lease = AuthorizationLease(
             lease_id=f"lease_{uuid4().hex}",
             request_id=request.request_id,
@@ -758,10 +772,7 @@ class PolicyEngine:
             issued_at=evaluation_time,
             expires_at=expires_at,
         )
-        key = (request.agent_id, reservation.budget_date)
-        self._reserved_spend[key] += request.amount
-        self._authorization_counts[key] += 1
-        self._reservations[reservation.reservation_id] = reservation
+        self._authorization_counts[(request.agent_id, budget_date)] += 1
         self._leases[lease.lease_id] = lease
 
         decision = replace(
@@ -852,14 +863,11 @@ class PolicyEngine:
                     f"Reservation is {reservation.status.value}, not held."
                 )
 
-            key = (reservation.agent_id, reservation.budget_date)
-            self._reserved_spend[key] -= reservation.amount
-            self._daily_spend[key] += reservation.amount
+            self.budget_ledger.commit(reservation_id, now=commit_time)
             committed = replace(
                 reservation,
                 status=ReservationStatus.COMMITTED,
             )
-            self._reservations[reservation_id] = committed
             self.audit_ledger.append(
                 "budget.committed",
                 {
@@ -888,57 +896,121 @@ class PolicyEngine:
                 raise ValueError(
                     f"Reservation is {reservation.status.value}, not held."
                 )
-            return self._release_reservation_unlocked(
-                reservation,
-                status=ReservationStatus.RELEASED,
-                reason=reason,
-            )
+            return self._release_reservation_unlocked(reservation, reason=reason)
 
     def get_reservation(self, reservation_id: str) -> BudgetReservation | None:
         with self._lock:
             self._expire_reservations_unlocked(datetime.now(timezone.utc))
-            return self._reservations.get(reservation_id)
+            return self._reservation_snapshot_unlocked(reservation_id)
+
+    def _sync_agent_unlocked(self, agent: AgentProfile) -> None:
+        """Mirror the policy envelope into the ledger, which enforces the cap."""
+
+        self.budget_ledger.register_agent(
+            agent.agent_id,
+            name=agent.name,
+            daily_budget=agent.daily_budget,
+            max_action_amount=agent.max_action_amount,
+            active=agent.active,
+        )
+
+    @staticmethod
+    def _to_budget_reservation(record: LedgerReservation) -> BudgetReservation:
+        return BudgetReservation(
+            reservation_id=record.reservation_id,
+            request_id=record.request_id,
+            agent_id=record.agent_id,
+            amount=record.amount,
+            currency=record.currency,
+            budget_date=record.budget_date,
+            expires_at=record.expires_at,
+            status=ReservationStatus(record.status),
+        )
+
+    def _reservation_snapshot_unlocked(
+        self, reservation_id: str
+    ) -> BudgetReservation | None:
+        record = self.budget_ledger.get(reservation_id)
+        return None if record is None else self._to_budget_reservation(record)
+
+    def _deny_for_budget_unlocked(
+        self, request: ActionRequest, decision: DecisionRecord
+    ) -> AuthorizationResult:
+        """Turn a lost race for headroom into an ordinary budget denial."""
+
+        denied = replace(
+            decision,
+            decision=Decision.DENY,
+            remaining_daily_budget=Decimal("0"),
+            findings=decision.findings
+            + (
+                PolicyFinding(
+                    code="DAILY_BUDGET_EXCEEDED",
+                    message=(
+                        "The action exceeds the agent's remaining daily budget."
+                    ),
+                    blocking=True,
+                ),
+            ),
+        )
+        result = AuthorizationResult(decision=denied)
+        self._authorizations[request.request_id] = (request, result)
+        self.audit_ledger.append(
+            "budget.reservation_refused",
+            {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "amount": request.amount,
+                "currency": request.currency,
+                "reason": "daily_budget_exceeded",
+            },
+        )
+        return result
 
     def _require_reservation_unlocked(
         self, reservation_id: str
     ) -> BudgetReservation:
-        reservation = self._reservations.get(reservation_id)
+        reservation = self._reservation_snapshot_unlocked(reservation_id)
         if reservation is None:
             raise KeyError(f"Unknown reservation: {reservation_id}")
         return reservation
 
     def _expire_reservations_unlocked(self, now: datetime) -> None:
-        for reservation in tuple(self._reservations.values()):
-            if (
-                reservation.status is ReservationStatus.HELD
-                and now >= reservation.expires_at
-            ):
-                self._release_reservation_unlocked(
-                    reservation,
-                    status=ReservationStatus.EXPIRED,
-                    reason="lease_expired",
-                )
+        for record in self.budget_ledger.expire_due(now=now):
+            self._audit_release_unlocked(
+                self._to_budget_reservation(record), reason="lease_expired"
+            )
 
     def _release_reservation_unlocked(
         self,
-        reservation: BudgetReservation,
+        reservation: BudgetReservation | LedgerReservation,
         *,
-        status: ReservationStatus,
         reason: str,
     ) -> BudgetReservation:
-        key = (reservation.agent_id, reservation.budget_date)
-        self._reserved_spend[key] -= reservation.amount
-        released = replace(reservation, status=status)
-        self._reservations[reservation.reservation_id] = released
+        if isinstance(reservation, LedgerReservation):
+            reservation = self._to_budget_reservation(reservation)
+        self.budget_ledger.release(
+            reservation.reservation_id,
+            now=datetime.now(timezone.utc),
+            reason=reason,
+        )
+        released = replace(reservation, status=ReservationStatus.RELEASED)
+        return self._audit_release_unlocked(released, reason=reason)
+
+    def _audit_release_unlocked(
+        self, released: BudgetReservation, *, reason: str
+    ) -> BudgetReservation:
+        """Record a hold coming off the books. The ledger has already moved it."""
+
         self.audit_ledger.append(
             "budget.released",
             {
-                "reservation_id": reservation.reservation_id,
-                "request_id": reservation.request_id,
-                "agent_id": reservation.agent_id,
-                "amount": reservation.amount,
-                "currency": reservation.currency,
-                "status": status.value,
+                "reservation_id": released.reservation_id,
+                "request_id": released.request_id,
+                "agent_id": released.agent_id,
+                "amount": released.amount,
+                "currency": released.currency,
+                "status": released.status.value,
                 "reason": reason,
             },
         )
@@ -971,9 +1043,21 @@ class PolicyEngine:
             if agent is None:
                 raise KeyError(f"Unknown agent: {request.agent_id}")
 
-            key = (request.agent_id, timestamp.date())
-            exposure = self._daily_spend[key] + self._reserved_spend[key]
-            if request.amount > agent.daily_budget - exposure:
+            # Hold then immediately consume, so the cap is checked and the
+            # spend written in one indivisible pair rather than a bare
+            # increment. The hold never outlives this block.
+            reservation_id = f"res_{uuid4().hex}"
+            try:
+                self.budget_ledger.reserve(
+                    reservation_id,
+                    request_id=request.request_id,
+                    agent_id=request.agent_id,
+                    amount=request.amount,
+                    currency=request.currency,
+                    budget_date=timestamp.date(),
+                    expires_at=timestamp + timedelta(minutes=1),
+                )
+            except BudgetExceeded:
                 self.audit_ledger.append(
                     "action.execution_rejected",
                     {
@@ -986,9 +1070,8 @@ class PolicyEngine:
                 )
                 raise ValueError(
                     "The action exceeds the agent's remaining daily budget."
-                )
-
-            self._daily_spend[key] += request.amount
+                ) from None
+            self.budget_ledger.commit(reservation_id, now=timestamp)
             self.audit_ledger.append(
                 "action.executed",
                 {
