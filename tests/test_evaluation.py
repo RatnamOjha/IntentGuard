@@ -44,6 +44,35 @@ class EvaluationHarnessTest(unittest.TestCase):
         self.assertEqual(["passed", "skipped"], [row["status"] for row in rows])
         self.assertTrue(all(row["duration_ms"] >= 0 for row in rows))
 
+    def test_manifest_runner_adds_repo_root_for_console_script(self) -> None:
+        manifest = {
+            "scenarios": [
+                {
+                    "id": "console-script",
+                    "category": "correctness",
+                    "requirement": "harness",
+                    "test": "fixture.loaded.by.test",
+                }
+            ]
+        }
+        from intentguard import evaluation
+
+        root = str(evaluation.ROOT)
+        without_root = [entry for entry in sys.path if entry != root]
+
+        def load_test(_loader, _name):  # noqa: ANN001, ANN202
+            self.assertEqual(root, sys.path[0])
+            return unittest.TestSuite([_Fixture("test_pass")])
+
+        with (
+            patch.object(sys, "path", without_root),
+            patch.object(unittest.TestLoader, "loadTestsFromName", load_test),
+        ):
+            rows = run_manifest(manifest)
+            self.assertEqual(without_root, sys.path)
+
+        self.assertEqual("passed", rows[0]["status"])
+
     def test_markdown_contains_required_evidence(self) -> None:
         report = {
             "generated_at": "2026-08-30T00:00:00+00:00",

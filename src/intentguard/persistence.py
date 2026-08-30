@@ -273,7 +273,8 @@ class PostgresStateRepository:
                     != state.revocation_epochs.get(agent_id)
                 ]
                 if changed_revocations:
-                    connection.executemany(
+                    self._executemany(
+                        connection,
                         """
                         INSERT INTO agent_revocations (agent_id, revocation_epoch)
                         VALUES (%s, %s)
@@ -289,18 +290,19 @@ class PostgresStateRepository:
                     if baseline.authorization_counts.get(key) != count
                 ]
                 if changed_counts:
-                    connection.executemany(
-                    """
-                    INSERT INTO authorization_counters
-                        (agent_id, budget_date, authorization_count)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (agent_id, budget_date) DO UPDATE SET
-                        authorization_count = GREATEST(
-                            authorization_counters.authorization_count,
-                            EXCLUDED.authorization_count
-                        )
-                    """,
-                    changed_counts,
+                    self._executemany(
+                        connection,
+                        """
+                        INSERT INTO authorization_counters
+                            (agent_id, budget_date, authorization_count)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (agent_id, budget_date) DO UPDATE SET
+                            authorization_count = GREATEST(
+                                authorization_counters.authorization_count,
+                                EXCLUDED.authorization_count
+                            )
+                        """,
+                        changed_counts,
                     )
         self._baseline = deepcopy(state)
 
@@ -366,7 +368,8 @@ class PostgresStateRepository:
             if baseline.get(item_id) != item
         ]
         if changed:
-            connection.executemany(
+            PostgresStateRepository._executemany(
+                connection,
                 f"""
                 INSERT INTO {table} ({key}, payload) VALUES (%s, %s)
                 ON CONFLICT ({key}) DO UPDATE SET
@@ -388,12 +391,13 @@ class PostgresStateRepository:
                 (request_id,),
             )
         changed = [
-                (request_id, jsonb(_encode(request)), jsonb(_encode(result)))
-                for request_id, (request, result) in values.items()
-                if baseline.get(request_id) != (request, result)
+            (request_id, jsonb(_encode(request)), jsonb(_encode(result)))
+            for request_id, (request, result) in values.items()
+            if baseline.get(request_id) != (request, result)
         ]
         if changed:
-            connection.executemany(
+            PostgresStateRepository._executemany(
+                connection,
                 """
                 INSERT INTO authorization_records
                     (request_id, request_payload, result_payload)
@@ -405,3 +409,12 @@ class PostgresStateRepository:
                 """,
                 changed,
             )
+
+    @staticmethod
+    def _executemany(
+        connection: Any, query: str, params: list[tuple[Any, ...]]
+    ) -> None:
+        """Execute a parameter batch through psycopg's cursor API."""
+
+        with connection.cursor() as cursor:
+            cursor.executemany(query, params)

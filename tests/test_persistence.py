@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -29,6 +30,22 @@ from intentguard.policy_engine import PolicyEngine  # noqa: E402
 
 
 NOW = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+
+class PostgresBatchApiTest(unittest.TestCase):
+    def test_batch_writes_use_a_psycopg_cursor(self) -> None:
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        params = [("first", 1), ("second", 2)]
+
+        PostgresStateRepository._executemany(
+            connection, "INSERT INTO example VALUES (%s, %s)", params
+        )
+
+        connection.cursor.assert_called_once_with()
+        cursor.executemany.assert_called_once_with(
+            "INSERT INTO example VALUES (%s, %s)", params
+        )
 
 
 class SharedStateContract:

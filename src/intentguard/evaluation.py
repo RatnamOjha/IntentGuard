@@ -8,6 +8,7 @@ import io
 import json
 import os
 import platform
+import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -67,33 +68,51 @@ class _Result(unittest.TestResult):
 def run_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """Execute each named unittest independently and retain auditable timing."""
 
+    # ``intentguard-evaluate`` is a console script, so Python starts with the
+    # virtual environment's bin directory on its import path rather than the
+    # repository root that contains the manifest's ``tests.*`` modules.
+    root = str(ROOT)
+    remove_root_after_run = root not in sys.path
+    if remove_root_after_run:
+        sys.path.insert(0, root)
+
     loader = unittest.TestLoader()
     rows: list[dict[str, Any]] = []
-    for scenario in manifest["scenarios"]:
-        suite = loader.loadTestsFromName(scenario["test"])
-        capture = io.StringIO()
-        result = _Result()
-        started = perf_counter_ns()
-        with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-            suite.run(result)
-        duration_ms = (perf_counter_ns() - started) / 1_000_000
-        if result.skipped:
-            status, detail = "skipped", result.skipped[0][1]
-        elif result.failures or result.errors or result.unexpectedSuccesses:
-            status, detail = "failed", result.failure_text or capture.getvalue()
-        elif result.testsRun != 1:
-            status, detail = "failed", f"Expected one test, loaded {result.testsRun}."
-        else:
-            status, detail = "passed", ""
-        rows.append(
-            {
-                **scenario,
-                "status": status,
-                "passed": status == "passed",
-                "duration_ms": round(duration_ms, 3),
-                "detail": detail.strip()[-4000:],
-            }
-        )
+    try:
+        for scenario in manifest["scenarios"]:
+            suite = loader.loadTestsFromName(scenario["test"])
+            capture = io.StringIO()
+            result = _Result()
+            started = perf_counter_ns()
+            with (
+                contextlib.redirect_stdout(capture),
+                contextlib.redirect_stderr(capture),
+            ):
+                suite.run(result)
+            duration_ms = (perf_counter_ns() - started) / 1_000_000
+            if result.skipped:
+                status, detail = "skipped", result.skipped[0][1]
+            elif result.failures or result.errors or result.unexpectedSuccesses:
+                status, detail = "failed", result.failure_text or capture.getvalue()
+            elif result.testsRun != 1:
+                status, detail = (
+                    "failed",
+                    f"Expected one test, loaded {result.testsRun}.",
+                )
+            else:
+                status, detail = "passed", ""
+            rows.append(
+                {
+                    **scenario,
+                    "status": status,
+                    "passed": status == "passed",
+                    "duration_ms": round(duration_ms, 3),
+                    "detail": detail.strip()[-4000:],
+                }
+            )
+    finally:
+        if remove_root_after_run:
+            sys.path.remove(root)
     return rows
 
 
