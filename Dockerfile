@@ -2,6 +2,10 @@ FROM openpolicyagent/opa:1.19.1-static AS opa
 
 FROM python:3.11.13-slim-bookworm AS runtime
 
+# The Python base image ships wheel system-wide, where image scanners see it.
+# Keep that copy above the version patched for CVE-2026-24049.
+ARG WHEEL_VERSION=0.48.0
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -17,7 +21,8 @@ COPY src ./src
 COPY policies ./policies
 COPY migrations ./migrations
 COPY scripts/migrate.py scripts/seed_demo.py ./scripts/
-RUN python -m venv .venv \
+RUN python -m pip install --no-cache-dir --upgrade "wheel==${WHEEL_VERSION}" \
+    && python -m venv .venv \
     && .venv/bin/pip install --no-cache-dir ".[api,postgres,agent]"
 
 USER intentguard
