@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -11,12 +12,12 @@ jobs:
   backend-quality:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           version: "0.8.15"
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install locked dependencies
@@ -63,12 +64,12 @@ jobs:
       INTENTGUARD_DATABASE_URL: postgresql://intentguard:intentguard-ci@127.0.0.1:5432/intentguard
       INTENTGUARD_LOG_LEVEL: WARNING
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           version: "0.8.15"
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: uv sync --all-extras --locked
@@ -88,12 +89,10 @@ jobs:
       run:
         working-directory: prototype
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24.17.0"
-          cache: pnpm
-          cache-dependency-path: prototype/pnpm-lock.yaml
       - run: corepack enable
       - run: corepack pnpm@11.24.0 install --frozen-lockfile
       - name: Frontend lint
@@ -106,14 +105,14 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           version: "0.8.15"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24.17.0"
       - run: uv sync --all-extras --locked
@@ -125,7 +124,9 @@ jobs:
       - name: Bandit high-severity scan
         run: uv run bandit -q -lll -r src scripts -x tests
       - name: Semgrep security scan
-        run: uvx --from semgrep==1.136.0 semgrep scan --config p/python --error src scripts
+        run: >-
+          uvx --with setuptools==80.9.0 --from semgrep==1.136.0
+          semgrep scan --config p/python --error src scripts
       - name: Frontend dependency audit
         working-directory: prototype
         run: corepack pnpm@11.24.0 audit --audit-level high
@@ -134,7 +135,7 @@ jobs:
     needs: [backend-quality, integration, frontend, security]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Build gateway image
