@@ -1,15 +1,23 @@
 FROM openpolicyagent/opa:1.19.1-static AS opa
 
-FROM python:3.11.13-slim-bookworm AS runtime
+FROM python:3.11.16-slim-bookworm AS runtime
 
 # The Python base image ships wheel system-wide, where image scanners see it.
 # Keep that copy above the version patched for CVE-2026-24049.
 ARG WHEEL_VERSION=0.48.0
+ARG SETUPTOOLS_VERSION=84.0.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH="/opt/intentguard/.venv/bin:${PATH}"
+
+RUN apt-get update \
+    && apt-get upgrade --yes \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir --upgrade \
+        "setuptools==${SETUPTOOLS_VERSION}" \
+        "wheel==${WHEEL_VERSION}"
 
 RUN groupadd --system intentguard \
     && useradd --system --gid intentguard --home-dir /opt/intentguard intentguard
@@ -21,8 +29,10 @@ COPY src ./src
 COPY policies ./policies
 COPY migrations ./migrations
 COPY scripts/migrate.py scripts/seed_demo.py ./scripts/
-RUN python -m pip install --no-cache-dir --upgrade "wheel==${WHEEL_VERSION}" \
-    && python -m venv .venv \
+RUN python -m venv .venv \
+    && .venv/bin/pip install --no-cache-dir --upgrade \
+        "setuptools==${SETUPTOOLS_VERSION}" \
+        "wheel==${WHEEL_VERSION}" \
     && .venv/bin/pip install --no-cache-dir ".[api,postgres,agent]"
 
 USER intentguard
