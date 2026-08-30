@@ -10,4 +10,5 @@ COPY --from=builder /opt/keycloak/ /opt/keycloak/
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true \
     KC_METRICS_ENABLED=true
+USER 1000
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
