@@ -313,9 +313,29 @@ class ReplayAfterRevocationThroughTheConnectorTest(unittest.TestCase):
 
     def setUp(self) -> None:
         from intentguard.api import create_app
+        from intentguard.auth import JwksAuthenticator
+        from tests.jwt_test_support import AUDIENCE, ISSUER, JWKS, bearer
 
         self.engine, _ = build_engine(now=datetime.now(timezone.utc))
-        self.client = TestClient(create_app(self.engine))
+        self.client = TestClient(
+            create_app(
+                self.engine,
+                authenticator=JwksAuthenticator(
+                    issuer=ISSUER,
+                    audience=AUDIENCE,
+                    jwks=JWKS,
+                    minimum_rsa_bits=512,
+                ),
+            )
+        )
+        self.client.headers.update(
+            bearer(
+                subject="adversarial-admin",
+                roles=["admin"],
+                agent_id=AGENT_ID,
+                customer_id="card-member-001",
+            )
+        )
 
     def test_the_connector_rejects_a_pre_revocation_lease(self) -> None:
         authorized = self.client.post(

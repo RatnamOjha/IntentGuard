@@ -14,6 +14,30 @@ except ImportError:  # Allows domain-only test runs before API extras are instal
     TestClient = None
 
 from intentguard import PolicyEngine  # noqa: E402
+from intentguard.auth import JwksAuthenticator  # noqa: E402
+from tests.jwt_test_support import (  # noqa: E402
+    AUDIENCE,
+    ISSUER,
+    JWKS,
+    bearer,
+)
+
+
+def test_authenticator() -> JwksAuthenticator:
+    return JwksAuthenticator(
+        issuer=ISSUER, audience=AUDIENCE, jwks=JWKS, minimum_rsa_bits=512
+    )
+
+
+def admin_headers(
+    *, customer_id: str = "customer-01", agent_id: str = "travel-01"
+) -> dict[str, str]:
+    return bearer(
+        subject="api-test-admin",
+        roles=["admin"],
+        customer_id=customer_id,
+        agent_id=agent_id,
+    )
 
 
 @unittest.skipIf(TestClient is None, "Install the api and dev extras to test FastAPI")
@@ -21,7 +45,10 @@ class ApiTest(unittest.TestCase):
     def setUp(self) -> None:
         from intentguard.api import create_app
 
-        self.client = TestClient(create_app(PolicyEngine()))
+        self.client = TestClient(
+            create_app(PolicyEngine(), authenticator=test_authenticator())
+        )
+        self.client.headers.update(admin_headers())
         self.now = datetime.now(timezone.utc)
         agent_response = self.client.post(
             "/v1/agents",
@@ -48,6 +75,16 @@ class ApiTest(unittest.TestCase):
             },
         )
         self.assertEqual(201, intent_response.status_code)
+
+    def test_container_health_endpoints_are_public_and_describe_dependencies(self) -> None:
+        live = self.client.get("/health/live", headers={"Authorization": ""})
+        ready = self.client.get("/health/ready", headers={"Authorization": ""})
+
+        self.assertEqual({"status": "ok"}, live.json())
+        self.assertEqual(200, ready.status_code)
+        self.assertEqual("ready", ready.json()["status"])
+        self.assertEqual("memory", ready.json()["database"])
+        self.assertEqual("memory", ready.json()["rate_limiter"])
 
     def action(self, request_id: str = "request-01") -> dict[str, object]:
         return {
@@ -152,6 +189,7 @@ class ApiTest(unittest.TestCase):
                 "reviewer": "Demo Operator",
                 "reason": "Verified with the card member",
             },
+            headers=bearer(subject="reviewer-01", roles=["reviewer"]),
         )
         self.assertEqual(200, approved.status_code)
         approved_body = approved.json()
@@ -178,6 +216,7 @@ class ApiTest(unittest.TestCase):
                 "reviewer": "Demo Operator",
                 "reason": "Card member denied the request",
             },
+            headers=bearer(subject="reviewer-01", roles=["reviewer"]),
         )
         self.assertEqual(200, rejected.status_code)
         self.assertEqual("rejected", rejected.json()["status"])
@@ -185,7 +224,12 @@ class ApiTest(unittest.TestCase):
     def test_demo_bootstrap_is_idempotent_and_exposes_agents(self) -> None:
         from intentguard.api import create_app
 
-        demo_client = TestClient(create_app(PolicyEngine()))
+        demo_client = TestClient(
+            create_app(PolicyEngine(), authenticator=test_authenticator())
+        )
+        demo_client.headers.update(
+            admin_headers(customer_id="demo-customer", agent_id="agt_travel_01")
+        )
         first = demo_client.post("/v1/demo/bootstrap")
         second = demo_client.post("/v1/demo/bootstrap")
 
@@ -304,7 +348,9 @@ class ApiTest(unittest.TestCase):
             "os.environ",
             {"INTENTGUARD_CORS_ORIGINS": "https://console.example.test"},
         ):
-            client = TestClient(create_app(PolicyEngine()))
+            client = TestClient(
+                create_app(PolicyEngine(), authenticator=test_authenticator())
+            )
         response = client.options(
             "/health",
             headers={
@@ -328,11 +374,14 @@ class AgentEndpointTest(unittest.TestCase):
         from intentguard.api import create_app
 
         self.engine = PolicyEngine()
-        app = create_app(self.engine)
+        app = create_app(self.engine, authenticator=test_authenticator())
         # A developer with a key exported must not make this suite hit the
         # network, so the planner is replaced rather than inherited.
         app.state.agent = GovernedAgent(self.engine, planner=ScriptedPlanner())
         self.client = TestClient(app)
+        self.client.headers.update(
+            admin_headers(customer_id="demo-customer", agent_id="agt_travel_01")
+        )
         self.client.post("/v1/demo/bootstrap")
 
     def _say(self, message: str, customer_id: str = "demo-customer") -> dict:
@@ -353,6 +402,9 @@ class AgentEndpointTest(unittest.TestCase):
         self.assertEqual("allow", body["decision"])
         self.assertEqual("scripted", body["planner"])
         self.assertIsNotNone(body["authorization"]["lease"])
+        self.assertEqual("scripted-v2", body["trace"]["model"])
+        self.assertEqual("scripted-rules-v2", body["trace"]["prompt_version"])
+        self.assertNotIn("refundable hotel", str(body["trace"]))
 
     def test_an_out_of_policy_request_is_refused_with_reasons(self) -> None:
         body = self._say("book a non-refundable hotel for 9000")
@@ -367,8 +419,7 @@ class AgentEndpointTest(unittest.TestCase):
             params={"customer_id": "someone-else", "agent_id": "agt_travel_01"},
         )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual([], response.json())
+        self.assertEqual(403, response.status_code)
 
     def test_refusals_reach_the_audit_trail(self) -> None:
         self._say("book a non-refundable hotel for 9000")

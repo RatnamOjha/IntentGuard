@@ -1,0 +1,111 @@
+{
+  "realm": "intentguard",
+  "enabled": true,
+  "displayName": "IntentGuard Local Identity",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {"name": "admin"},
+      {"name": "reviewer"},
+      {"name": "agent"},
+      {"name": "customer"},
+      {"name": "connector"}
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "intentguard-api",
+      "name": "IntentGuard local clients",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "intentguard audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {"included.client.audience": "intentguard-api", "access.token.claim": "true"}
+        },
+        {
+          "name": "agent id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {"user.attribute": "agent_id", "claim.name": "agent_id", "jsonType.label": "String", "access.token.claim": "true"}
+        },
+        {
+          "name": "customer id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {"user.attribute": "customer_id", "claim.name": "customer_id", "jsonType.label": "String", "access.token.claim": "true"}
+        }
+      ]
+    },
+    {
+      "clientId": "intentguard-connector",
+      "name": "Protected booking connector",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "intentguard-connector-local-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "intentguard audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {"included.client.audience": "intentguard-api", "access.token.claim": "true"}
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{"type": "password", "value": "admin-local-only", "temporary": false}],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "reviewer",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{"type": "password", "value": "reviewer-local-only", "temporary": false}],
+      "realmRoles": ["reviewer"]
+    },
+    {
+      "username": "demo-agent",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {"agent_id": ["travel-01"], "customer_id": ["demo-customer"]},
+      "credentials": [{"type": "password", "value": "agent-local-only", "temporary": false}],
+      "realmRoles": ["agent"]
+    },
+    {
+      "username": "demo-customer",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {"customer_id": ["demo-customer"]},
+      "credentials": [{"type": "password", "value": "customer-local-only", "temporary": false}],
+      "realmRoles": ["customer"]
+    },
+    {
+      "username": "service-account-intentguard-connector",
+      "enabled": true,
+      "serviceAccountClientId": "intentguard-connector",
+      "realmRoles": ["connector"]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import {
   type ApiAuthorization,
   type ApiBenchmark,
   type ApiRoundTripBenchmark,
+  type ApiPolicyVersion,
   authorizeAction,
   bootstrapDemo,
   commitAuthorization,
@@ -20,6 +21,7 @@ import {
   getAuditStatus,
   getBenchmark,
   getFleetStatus,
+  getPolicyVersions,
   resetDemo,
   resolveApproval,
   runApiRoundTripBenchmark,
@@ -380,6 +382,7 @@ export default function Home() {
     active: true,
   });
   const [policyVersion, setPolicyVersion] = useState("2026.07");
+  const [regoVersions, setRegoVersions] = useState<ApiPolicyVersion[]>([]);
 
   const liveCount = agents.filter((agent) => agent.status === "Live").length;
   const pendingApprovals = approvals.filter(
@@ -397,12 +400,13 @@ export default function Home() {
     [events, pendingApprovals.length],
   );
   const refreshData = useCallback(async () => {
-    const [apiAgents, fleet, apiApprovals, auditEvents, status] = await Promise.all([
+    const [apiAgents, fleet, apiApprovals, auditEvents, status, policies] = await Promise.all([
       getAgents(),
       getFleetStatus(),
       getApprovals(),
       getAuditEvents(),
       getAuditStatus(),
+      getPolicyVersions().catch(() => [] as ApiPolicyVersion[]),
     ]);
     const mappedAgents = apiAgents.map(toAgent);
     const names = Object.fromEntries(
@@ -421,6 +425,9 @@ export default function Home() {
     setFleetStopped(fleet.stopped);
     setApprovals(apiApprovals);
     setAuditStatus(status);
+    setRegoVersions(policies);
+    const activeRego = policies.find((policy) => policy.status === "published");
+    if (activeRego) setPolicyVersion(activeRego.version_id);
     setEvents(
       auditEvents
         .map((event) => toEvent(event, names))
@@ -1310,6 +1317,16 @@ export default function Home() {
               <small className="editor-note">
                 Publishing is immediate, versioned and appended to the audit chain.
               </small>
+              <div className="configuration-summary" aria-label="Rego policy versions">
+                <span>
+                  <small>OPA / REGO</small>
+                  <strong>{regoVersions.find((item) => item.status === "published")?.version_id ?? "Unavailable"}</strong>
+                </span>
+                <span>
+                  <small>VERSION HISTORY</small>
+                  <strong>{regoVersions.length}</strong>
+                </span>
+              </div>
             </div>
           </div>
         </section>
@@ -1467,7 +1484,18 @@ export default function Home() {
             <div className="integration-groups">
               <div>
                 <span className="integration-label current">RUNNING NOW</span>
-                {["FastAPI gateway", "Python policy engine", "In-memory state"].map(
+                {[
+                  "FastAPI gateway",
+                  "OPA / Rego policy decisions",
+                  "PostgreSQL durable state",
+                  "Redis distributed rate limits",
+                  "Keycloak local identity",
+                  "Docker Compose runtime",
+                  "Ed25519 signed intent",
+                  "Protected booking connector",
+                  "OpenTelemetry · Prometheus · Grafana",
+                  "Rate limits · circuit breaker",
+                ].map(
                   (integration) => (
                     <span className="integration-item" key={integration}>
                       <i /> {integration}
@@ -1477,7 +1505,7 @@ export default function Home() {
               </div>
               <div>
                 <span className="integration-label roadmap">PRODUCTION ROADMAP</span>
-                {["OPA · Rego", "PostgreSQL · Redis", "Prometheus · Splunk"].map(
+                {["Live AWS deployment", "Splunk export", "Signed OPA bundles"].map(
                   (integration) => (
                     <span className="integration-item roadmap" key={integration}>
                       <i /> {integration}

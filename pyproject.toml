@@ -7,11 +7,19 @@ name = "intentguard"
 version = "0.1.0"
 description = "Runtime governance for financial AI agents"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "cryptography>=50.0.1,<51",
+    "opentelemetry-api>=1.38,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.38,<2",
+    "opentelemetry-sdk>=1.38,<2",
+    "pydantic>=2.12,<3",
+    "prometheus-client>=0.23,<1",
+]
 
 [project.optional-dependencies]
 api = [
     "fastapi==0.140.0",
+    "redis>=6.3,<8",
     "uvicorn[standard]==0.51.0",
 ]
 postgres = [
@@ -19,17 +27,24 @@ postgres = [
     "psycopg-pool==3.2.4",
 ]
 agent = [
-    # Only needed for the Grok-backed planner. Without it the agent falls back
+    # Only needed for model-backed planners. Without it the agent falls back
     # to the scripted planner, which has no dependencies.
     "httpx==0.28.1",
 ]
 dev = [
+    "bandit>=1.8,<2",
     "httpx==0.28.1",
+    "mypy>=1.17,<2",
+    "pip-audit>=2.9,<3",
+    "ruff>=0.12,<1",
 ]
 
 [project.scripts]
 intentguard-api = "intentguard.api:run"
 intentguard-benchmark = "intentguard.benchmark:main"
+intentguard-booking-connector = "intentguard.booking_connector:run"
+intentguard-evaluate = "intentguard.evaluation:main"
+intentguard-llm-eval = "intentguard.llm_eval:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

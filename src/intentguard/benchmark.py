@@ -638,6 +638,8 @@ def measure_http_round_trip(
     requests: int = 500,
     concurrency: int = 16,
     warmup: int = 25,
+    authenticator: Any | None = None,
+    authorization_header: str | None = None,
 ) -> dict[str, Any]:
     """Measure end-to-end HTTP latency against a real Uvicorn server.
 
@@ -665,9 +667,22 @@ def measure_http_round_trip(
     # import would be circular.
     from .api import create_app
 
+    authorization = authorization_header or os.getenv(
+        "INTENTGUARD_BENCHMARK_AUTHORIZATION"
+    )
+    if authorization is None:
+        return {
+            "scope": "http_round_trip_authorize",
+            "measured": False,
+            "reason": (
+                "Set INTENTGUARD_BENCHMARK_AUTHORIZATION to a valid admin "
+                "Bearer token before measuring the authenticated HTTP path."
+            ),
+        }
+
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(),
+            create_app(authenticator=authenticator),
             host="127.0.0.1",
             port=0,
             log_level="error",
@@ -694,7 +709,11 @@ def measure_http_round_trip(
             with httpx.Client(timeout=30.0) as client:
                 for label in labels:
                     started = perf_counter_ns()
-                    response = client.post(url, json={"request_id": label})
+                    response = client.post(
+                        url,
+                        json={"request_id": label},
+                        headers={"Authorization": authorization},
+                    )
                     samples.append((perf_counter_ns() - started) / 1_000_000)
                     response.raise_for_status()
                     if response.json()["decision"] != "allow":

@@ -1,0 +1,88 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "title": "Authorization decisions (5m)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum by (decision) (rate(intentguard_authorization_requests_total[5m]))", "legendFormat": "{{decision}}", "refId": "A"}]
+    },
+    {
+      "title": "Gateway latency percentiles", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(intentguard_http_request_duration_seconds_bucket{service=\"intentguard-governance-gateway\"}[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(intentguard_http_request_duration_seconds_bucket{service=\"intentguard-governance-gateway\"}[5m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(intentguard_http_request_duration_seconds_bucket{service=\"intentguard-governance-gateway\"}[5m])))", "legendFormat": "p99", "refId": "C"}
+      ]
+    },
+    {
+      "title": "Policy evaluation p95", "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(intentguard_policy_evaluation_duration_seconds_bucket[5m])))", "refId": "A"}]
+    },
+    {
+      "title": "Oldest approval", "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "intentguard_approval_queue_oldest_age_seconds", "refId": "A"}]
+    },
+    {
+      "title": "Connector failures", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 8},
+      "targets": [{"expr": "sum by (reason) (increase(intentguard_connector_failures_total[15m]))", "legendFormat": "{{reason}}", "refId": "A"}]
+    },
+    {
+      "title": "Lease and budget failures", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 8},
+      "targets": [
+        {"expr": "increase(intentguard_lease_expirations_total[15m])", "legendFormat": "expired leases", "refId": "A"},
+        {"expr": "sum(increase(intentguard_budget_reservation_failures_total[15m]))", "legendFormat": "budget failures", "refId": "B"}
+      ]
+    },
+    {
+      "title": "LLM latency p95", "type": "timeseries",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(intentguard_llm_duration_seconds_bucket[5m])))", "legendFormat": "{{provider}} / {{model}}", "refId": "A"}]
+    },
+    {
+      "title": "LLM token rate", "type": "timeseries",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
+      "targets": [{"expr": "sum by (provider, model, direction) (rate(intentguard_llm_tokens_total[5m]))", "legendFormat": "{{provider}} / {{model}} / {{direction}}", "refId": "A"}]
+    },
+    {
+      "title": "Revocation propagation p95", "type": "stat",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 21},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(intentguard_revocation_propagation_seconds_bucket[5m])))", "refId": "A"}]
+    },
+    {
+      "title": "Connector result rate", "type": "timeseries",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 21},
+      "targets": [{"expr": "sum by (result) (rate(intentguard_connector_requests_total[5m]))", "legendFormat": "{{result}}", "refId": "A"}]
+    },
+    {
+      "title": "HTTP 5xx rate", "type": "timeseries",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 21},
+      "targets": [{"expr": "sum by (service, route) (rate(intentguard_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "{{service}} {{route}}", "refId": "A"}]
+    },
+    {
+      "title": "Abuse-control rejections", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 26},
+      "targets": [{"expr": "sum by (scope, reason) (increase(intentguard_abuse_rejections_total[15m]))", "legendFormat": "{{scope}} / {{reason}}", "refId": "A"}]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 42,
+  "tags": ["intentguard", "governance", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "IntentGuard Operational Overview",
+  "uid": "intentguard-operations",
+  "version": 1
+}

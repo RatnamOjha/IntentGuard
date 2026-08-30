@@ -10,6 +10,7 @@ venv/
 .env
 .env.*
 !.env.example
+!.env.compose.example
 .DS_Store
 dist/
 build/
@@ -17,9 +18,7 @@ build/
 !prototype/build/**
 *.egg-info/
 .pnpm-store/
-
-# Local demo script
-/docs/demo-script.md
+.tools/
 
 # Personal working notes, not part of the public repo
 /Workflow.md

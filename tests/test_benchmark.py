@@ -70,8 +70,20 @@ class BenchmarkTest(unittest.TestCase):
 @unittest.skipUnless(HTTP_EXTRAS, "Install the api and dev extras for HTTP timing")
 class HttpRoundTripBenchmarkTest(unittest.TestCase):
     def test_measures_real_http_latency_under_concurrency(self) -> None:
+        from intentguard.auth import JwksAuthenticator
+        from tests.jwt_test_support import AUDIENCE, ISSUER, JWKS, token
+
         measured = measure_http_round_trip(
-            requests=24, concurrency=4, warmup=4
+            requests=24,
+            concurrency=4,
+            warmup=4,
+            authenticator=JwksAuthenticator(
+                issuer=ISSUER,
+                audience=AUDIENCE,
+                jwks=JWKS,
+                minimum_rsa_bits=512,
+            ),
+            authorization_header="Bearer " + token(roles=["admin"]),
         )
 
         self.assertTrue(measured["measured"])

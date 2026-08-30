@@ -32,6 +32,10 @@ from .models import (
     ReservationStatus,
     RiskAssessment,
 )
+from .intent import IntentVerifier
+from .execution_lease import ExecutionLeaseSigner
+from .persistence import GovernanceState, StateRepository
+from .policy import PolicyEvaluator
 
 
 class PolicyEngine:
@@ -57,7 +61,15 @@ class PolicyEngine:
         review_risk_threshold: int = 70,
         audit_ledger: AuditLedger | None = None,
         budget_ledger: BudgetLedger | None = None,
+        state_repository: StateRepository | None = None,
+        intent_verifier: IntentVerifier | None = None,
+        lease_signer: ExecutionLeaseSigner | None = None,
+        policy_evaluator: PolicyEvaluator | None = None,
+        max_outstanding_reservations: int = 20,
+        max_pending_approvals: int = 500,
     ) -> None:
+        if max_outstanding_reservations < 1 or max_pending_approvals < 1:
+            raise ValueError("Resource limits must be positive.")
         self.policy_version = policy_version
         self._policy_revision = 0
         self.review_risk_threshold = review_risk_threshold
@@ -65,6 +77,7 @@ class PolicyEngine:
         self._agents: dict[str, AgentProfile] = {}
         self._intents: dict[str, IntentPassport] = {}
         self._revoked_agents: set[str] = set()
+        self._revocation_epochs: dict[str, int] = {}
         # All budget accounting lives here. Pass a PostgresBudgetLedger to make
         # the cap hold across replicas; the in-memory default is single-process.
         self.budget_ledger: BudgetLedger = budget_ledger or InMemoryBudgetLedger()
@@ -76,29 +89,112 @@ class PolicyEngine:
         self._approvals: dict[str, HumanApproval] = {}
         self._fleet_stopped = False
         self._fleet_epoch = 0
+        self.state_repository = state_repository
+        self.intent_verifier = intent_verifier
+        self.lease_signer = lease_signer
+        self.policy_evaluator = policy_evaluator
+        self.max_outstanding_reservations = max_outstanding_reservations
+        self.max_pending_approvals = max_pending_approvals
         self._lock = RLock()
+        if self.state_repository is not None:
+            self._refresh_state_unlocked()
+
+    def _refresh_state_unlocked(self) -> None:
+        if self.state_repository is None:
+            return
+        state = self.state_repository.load(
+            default_policy_version=self.policy_version
+        )
+        self.policy_version = state.policy_version
+        self._policy_revision = state.policy_revision
+        self._agents = state.agents
+        self._intents = state.intents
+        self._revoked_agents = state.revoked_agents
+        self._revocation_epochs = state.revocation_epochs
+        self._authorization_counts = defaultdict(
+            int, state.authorization_counts
+        )
+        self._leases = state.leases
+        self._authorizations = state.authorizations
+        self._approvals = state.approvals
+        self._fleet_stopped = state.fleet_stopped
+        self._fleet_epoch = state.fleet_epoch
+
+    def _persist_state_unlocked(self) -> None:
+        if self.state_repository is None:
+            return
+        self.state_repository.save(
+            GovernanceState(
+                policy_version=self.policy_version,
+                policy_revision=self._policy_revision,
+                agents=dict(self._agents),
+                intents=dict(self._intents),
+                revoked_agents=set(self._revoked_agents),
+                revocation_epochs=dict(self._revocation_epochs),
+                authorization_counts=dict(self._authorization_counts),
+                leases=dict(self._leases),
+                authorizations=dict(self._authorizations),
+                approvals=dict(self._approvals),
+                fleet_stopped=self._fleet_stopped,
+                fleet_epoch=self._fleet_epoch,
+            )
+        )
+
+    def close(self) -> None:
+        """Release database pools owned by the configured backends."""
+
+        seen: set[int] = set()
+        for backend in (
+            self.state_repository,
+            self.budget_ledger,
+            self.policy_evaluator,
+            self.audit_ledger,
+            self.intent_verifier,
+            self.lease_signer,
+        ):
+            if backend is None or id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            close = getattr(backend, "close", None)
+            if callable(close):
+                close()
 
     @property
     def fleet_stopped(self) -> bool:
         with self._lock:
+            self._refresh_state_unlocked()
             return self._fleet_stopped
 
     @property
     def fleet_epoch(self) -> int:
         with self._lock:
+            self._refresh_state_unlocked()
             return self._fleet_epoch
 
     def register_agent(self, agent: AgentProfile) -> None:
         with self._lock:
+            self._refresh_state_unlocked()
             self._agents[agent.agent_id] = agent
             self._sync_agent_unlocked(agent)
             self.audit_ledger.append(
                 "agent.registered",
                 {"agent_id": agent.agent_id, "name": agent.name},
             )
+            self._persist_state_unlocked()
 
-    def register_intent(self, intent: IntentPassport) -> None:
+    def register_intent(
+        self,
+        intent: IntentPassport,
+        *,
+        expected_customer_id: str | None = None,
+        verify: bool = True,
+    ) -> None:
         with self._lock:
+            self._refresh_state_unlocked()
+            if verify and self.intent_verifier is not None:
+                self.intent_verifier.verify_and_consume(
+                    intent, expected_customer_id=expected_customer_id
+                )
             self._intents[intent.intent_id] = intent
             self.audit_ledger.append(
                 "intent.registered",
@@ -106,8 +202,13 @@ class PolicyEngine:
                     "intent_id": intent.intent_id,
                     "agent_id": intent.agent_id,
                     "customer_id": intent.customer_id,
+                    "issuer": intent.issuer or None,
+                    "key_id": intent.key_id or None,
+                    "nonce": intent.nonce or None,
+                    "signed": bool(intent.signature),
                 },
             )
+            self._persist_state_unlocked()
 
     def update_agent_policy(
         self,
@@ -129,6 +230,7 @@ class PolicyEngine:
             raise ValueError("Policy amounts cannot be negative.")
 
         with self._lock:
+            self._refresh_state_unlocked()
             current = self._agents.get(agent_id)
             if current is None:
                 raise KeyError(f"Unknown agent: {agent_id}")
@@ -172,6 +274,7 @@ class PolicyEngine:
                     },
                 },
             )
+            self._persist_state_unlocked()
             return updated
 
     def list_agent_states(
@@ -181,6 +284,7 @@ class PolicyEngine:
 
         snapshot_time = now or datetime.now(timezone.utc)
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(snapshot_time)
             states: list[dict[str, Any]] = []
             for agent in sorted(self._agents.values(), key=lambda item: item.agent_id):
@@ -224,6 +328,7 @@ class PolicyEngine:
 
         moment = now or datetime.now(timezone.utc)
         with self._lock:
+            self._refresh_state_unlocked()
             return tuple(
                 sorted(
                     (
@@ -241,6 +346,7 @@ class PolicyEngine:
         """Return newest human-review requests first."""
 
         with self._lock:
+            self._refresh_state_unlocked()
             return tuple(
                 sorted(
                     self._approvals.values(),
@@ -251,17 +357,23 @@ class PolicyEngine:
 
     def revoke_agent(self, agent_id: str) -> None:
         with self._lock:
+            self._refresh_state_unlocked()
             self._revoked_agents.add(agent_id)
+            self._revocation_epochs[agent_id] = (
+                self._revocation_epochs.get(agent_id, 0) + 1
+            )
             self.audit_ledger.append("agent.revoked", {"agent_id": agent_id})
             for reservation in self.budget_ledger.held(agent_id):
                 self._release_reservation_unlocked(
                     reservation, reason="agent_revoked"
                 )
+            self._persist_state_unlocked()
 
     def restore_agent(self, agent_id: str) -> None:
         """Remove an agent's runtime revocation without changing its profile."""
 
         with self._lock:
+            self._refresh_state_unlocked()
             if agent_id not in self._agents:
                 raise KeyError(f"Unknown agent: {agent_id}")
             was_revoked = agent_id in self._revoked_agents
@@ -270,9 +382,11 @@ class PolicyEngine:
                 "agent.restored",
                 {"agent_id": agent_id, "was_revoked": was_revoked},
             )
+            self._persist_state_unlocked()
 
     def stop_fleet(self, *, reason: str) -> None:
         with self._lock:
+            self._refresh_state_unlocked()
             self._fleet_stopped = True
             self._fleet_epoch += 1
             self.audit_ledger.append(
@@ -283,13 +397,16 @@ class PolicyEngine:
                 self._release_reservation_unlocked(
                     reservation, reason="fleet_stopped"
                 )
+            self._persist_state_unlocked()
 
     def resume_fleet(self) -> None:
         with self._lock:
+            self._refresh_state_unlocked()
             self._fleet_stopped = False
             self.audit_ledger.append(
                 "fleet.resumed", {"fleet_epoch": self._fleet_epoch}
             )
+            self._persist_state_unlocked()
 
     def evaluate(
         self,
@@ -298,6 +415,7 @@ class PolicyEngine:
         now: datetime | None = None,
     ) -> DecisionRecord:
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(now or datetime.now(timezone.utc))
             return self._evaluate_unlocked(request, now=now)
 
@@ -308,6 +426,8 @@ class PolicyEngine:
         now: datetime | None = None,
     ) -> DecisionRecord:
         evaluation_time = now or datetime.now(timezone.utc)
+        if self.policy_evaluator is not None:
+            return self._evaluate_rego_unlocked(request, evaluation_time)
         findings: list[PolicyFinding] = []
         agent = self._agents.get(request.agent_id)
         intent = self._intents.get(request.intent_id)
@@ -502,6 +622,108 @@ class PolicyEngine:
         )
         return record
 
+    def _evaluate_rego_unlocked(
+        self, request: ActionRequest, evaluation_time: datetime
+    ) -> DecisionRecord:
+        """Build trusted state input while delegating declarative rules to Rego."""
+
+        agent = self._agents.get(request.agent_id)
+        intent = self._intents.get(request.intent_id)
+        spent_today = Decimal("0")
+        if agent is not None:
+            exposure = self.budget_ledger.exposure(
+                request.agent_id, evaluation_time.date()
+            )
+            spent_today = exposure.committed + exposure.reserved
+        remaining_budget = (
+            max(agent.daily_budget - spent_today, Decimal("0"))
+            if agent is not None
+            else Decimal("0")
+        )
+        derived_risk, risk_signals = self._derive_risk(
+            request,
+            agent,
+            intent,
+            exposure=spent_today,
+            evaluation_time=evaluation_time,
+        )
+        risk = RiskAssessment(
+            declared=request.risk_score,
+            derived=derived_risk,
+            signals=risk_signals,
+        )
+        policy_input = {
+            "fleet_stopped": self._fleet_stopped,
+            "request": {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "action": request.action,
+                "amount": float(request.amount),
+                "currency": request.currency,
+                "customer_id": request.customer_id,
+                "attributes": request.attributes,
+            },
+            "agent": {
+                "known": agent is not None,
+                "active": bool(agent and agent.active),
+                "revoked": request.agent_id in self._revoked_agents,
+                "allowed_actions": sorted(agent.allowed_actions) if agent else [],
+                "max_action_amount": float(agent.max_action_amount) if agent else 0,
+                "remaining_daily_budget": float(remaining_budget),
+            },
+            "intent": {
+                "known": intent is not None,
+                "agent_id": intent.agent_id if intent else None,
+                "action": intent.action if intent else None,
+                "customer_id": intent.customer_id if intent else None,
+                "currency": intent.currency if intent else None,
+                "max_amount": float(intent.max_amount) if intent else 0,
+                "expired": bool(intent and intent.is_expired(evaluation_time)),
+                "required_attributes": intent.required_attributes if intent else {},
+            },
+            "risk": {
+                "declared": risk.declared,
+                "derived": risk.derived,
+                "effective": risk.effective,
+                "under_declared": (
+                    risk.declared < self.review_risk_threshold <= risk.derived
+                ),
+            },
+            "config": {
+                "review_risk_threshold": self.review_risk_threshold,
+                "large_booking_threshold": 10000,
+                "review_merchant_categories": [
+                    "cash_equivalent",
+                    "restricted_travel",
+                ],
+            },
+        }
+        policy = self.policy_evaluator.evaluate(policy_input)
+        record = DecisionRecord(
+            request_id=request.request_id,
+            decision=policy.decision,
+            findings=policy.findings,
+            remaining_daily_budget=remaining_budget,
+            policy_version=policy.policy_version,
+            risk=risk,
+        )
+        self.audit_ledger.append(
+            "policy.evaluated",
+            {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "decision": policy.decision.value,
+                "finding_codes": [item.code for item in policy.findings],
+                "policy_version": policy.policy_version,
+                "policy_engine": "opa_rego",
+                "declared_risk": risk.declared,
+                "derived_risk": risk.derived,
+                "effective_risk": risk.effective,
+                "risk_signals": list(risk.signals),
+            },
+        )
+        return record
+
     def authorize_action(
         self,
         request: ActionRequest,
@@ -515,6 +737,7 @@ class PolicyEngine:
         if lease_ttl.total_seconds() <= 0:
             raise ValueError("The execution lease TTL must be positive.")
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(evaluation_time)
             existing = self._authorizations.get(request.request_id)
             if existing is not None:
@@ -548,10 +771,64 @@ class PolicyEngine:
                         previous_request,
                         previous_result,
                     )
+                self._persist_state_unlocked()
                 return previous_result
 
             decision = self._evaluate_unlocked(request, now=evaluation_time)
+            if (
+                decision.decision is not Decision.DENY
+                and len(self.budget_ledger.held(request.agent_id))
+                >= self.max_outstanding_reservations
+            ):
+                decision = replace(
+                    decision,
+                    decision=Decision.DENY,
+                    findings=decision.findings
+                    + (
+                        PolicyFinding(
+                            code="OUTSTANDING_RESERVATION_LIMIT",
+                            message=(
+                                "The agent has reached its maximum number of "
+                                "outstanding budget reservations."
+                            ),
+                            blocking=True,
+                        ),
+                    ),
+                )
             if decision.decision is Decision.REVIEW:
+                pending_count = sum(
+                    approval.status is ApprovalStatus.PENDING
+                    for approval in self._approvals.values()
+                )
+                if pending_count >= self.max_pending_approvals:
+                    decision = replace(
+                        decision,
+                        decision=Decision.DENY,
+                        findings=decision.findings
+                        + (
+                            PolicyFinding(
+                                code="APPROVAL_QUEUE_FULL",
+                                message=(
+                                    "The approval queue is at capacity; the "
+                                    "action failed closed."
+                                ),
+                                blocking=True,
+                            ),
+                        ),
+                    )
+                    result = AuthorizationResult(decision=decision)
+                    self._authorizations[request.request_id] = (request, result)
+                    self.audit_ledger.append(
+                        "approval.queue.rejected",
+                        {
+                            "request_id": request.request_id,
+                            "agent_id": request.agent_id,
+                            "pending_count": pending_count,
+                            "limit": self.max_pending_approvals,
+                        },
+                    )
+                    self._persist_state_unlocked()
+                    return result
                 approval = HumanApproval(
                     request_id=request.request_id,
                     agent_id=request.agent_id,
@@ -580,18 +857,22 @@ class PolicyEngine:
                         "declared_risk": request.risk_score,
                     },
                 )
+                self._persist_state_unlocked()
                 return result
             if decision.decision is Decision.DENY:
                 result = AuthorizationResult(decision=decision)
                 self._authorizations[request.request_id] = (request, result)
+                self._persist_state_unlocked()
                 return result
 
-            return self._issue_authorization_unlocked(
+            result = self._issue_authorization_unlocked(
                 request,
                 decision,
                 evaluation_time=evaluation_time,
                 lease_ttl=lease_ttl,
             )
+            self._persist_state_unlocked()
+            return result
 
     def approve_action(
         self,
@@ -608,6 +889,7 @@ class PolicyEngine:
             raise ValueError("The execution lease TTL must be positive.")
         resolution_time = now or datetime.now(timezone.utc)
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(resolution_time)
             approval = self._approvals.get(request_id)
             if approval is None:
@@ -618,6 +900,8 @@ class PolicyEngine:
                 raise ValueError("The approval request has already been rejected.")
 
             request, _ = self._authorizations[request_id]
+            if request.submitted_by is not None and request.submitted_by == reviewer:
+                raise ValueError("A reviewer cannot approve their own request.")
             current_decision = self._evaluate_unlocked(
                 request,
                 now=resolution_time,
@@ -660,12 +944,14 @@ class PolicyEngine:
                     "reason": reason,
                 },
             )
-            return self._issue_authorization_unlocked(
+            result = self._issue_authorization_unlocked(
                 request,
                 approved_decision,
                 evaluation_time=resolution_time,
                 lease_ttl=lease_ttl,
             )
+            self._persist_state_unlocked()
+            return result
 
     def reject_action(
         self,
@@ -679,6 +965,7 @@ class PolicyEngine:
 
         resolution_time = now or datetime.now(timezone.utc)
         with self._lock:
+            self._refresh_state_unlocked()
             approval = self._approvals.get(request_id)
             if approval is None:
                 raise KeyError(f"Unknown approval request: {request_id}")
@@ -688,6 +975,8 @@ class PolicyEngine:
                 raise ValueError("The approval request has already been approved.")
 
             request, previous_result = self._authorizations[request_id]
+            if request.submitted_by is not None and request.submitted_by == reviewer:
+                raise ValueError("A reviewer cannot resolve their own request.")
             rejected_decision = replace(
                 previous_result.decision,
                 decision=Decision.DENY,
@@ -725,6 +1014,7 @@ class PolicyEngine:
                     "reason": reason,
                 },
             )
+            self._persist_state_unlocked()
             return rejected
 
     def _issue_authorization_unlocked(
@@ -771,7 +1061,12 @@ class PolicyEngine:
             fleet_epoch=self._fleet_epoch,
             issued_at=evaluation_time,
             expires_at=expires_at,
+            action=request.action,
+            amount=request.amount,
+            currency=request.currency,
         )
+        if self.lease_signer is not None:
+            lease = self.lease_signer.sign(lease)
         self._authorization_counts[(request.agent_id, budget_date)] += 1
         self._leases[lease.lease_id] = lease
 
@@ -824,6 +1119,7 @@ class PolicyEngine:
                 "risk_score",
                 "attributes",
                 "customer_id",
+                "submitted_by",
             )
             if getattr(previous, field) != getattr(current, field)
         )
@@ -847,6 +1143,7 @@ class PolicyEngine:
 
         commit_time = now or datetime.now(timezone.utc)
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(commit_time)
             reservation = self._require_reservation_unlocked(reservation_id)
             lease = self._leases.get(lease_id)
@@ -890,6 +1187,7 @@ class PolicyEngine:
         """Release a held reservation after failure or cancellation."""
 
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(now or datetime.now(timezone.utc))
             reservation = self._require_reservation_unlocked(reservation_id)
             if reservation.status is not ReservationStatus.HELD:
@@ -900,6 +1198,7 @@ class PolicyEngine:
 
     def get_reservation(self, reservation_id: str) -> BudgetReservation | None:
         with self._lock:
+            self._refresh_state_unlocked()
             self._expire_reservations_unlocked(datetime.now(timezone.utc))
             return self._reservation_snapshot_unlocked(reservation_id)
 
@@ -1033,6 +1332,7 @@ class PolicyEngine:
         """
 
         with self._lock:
+            self._refresh_state_unlocked()
             if decision.decision is not Decision.ALLOW:
                 raise ValueError("Only allowed actions can be recorded as executed.")
             if decision.request_id != request.request_id:

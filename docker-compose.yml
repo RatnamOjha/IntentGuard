@@ -1,0 +1,241 @@
+name: intentguard
+
+x-backend-environment: &backend-environment
+  INTENTGUARD_DATABASE_URL: postgresql://intentguard:${POSTGRES_PASSWORD:-intentguard-local-change-me}@postgres:5432/intentguard
+  INTENTGUARD_REDIS_URL: redis://redis:6379/0
+  INTENTGUARD_OPA_EXECUTABLE: /usr/local/bin/opa
+  INTENTGUARD_JWT_ISSUER: ${INTENTGUARD_JWT_ISSUER:-http://localhost:8080/realms/intentguard}
+  INTENTGUARD_JWT_AUDIENCE: intentguard-api
+  INTENTGUARD_JWKS_URL: http://keycloak:8080/realms/intentguard/protocol/openid-connect/certs
+  INTENTGUARD_CORS_ORIGINS: ${INTENTGUARD_CORS_ORIGINS:-http://localhost:3000}
+  INTENTGUARD_LOG_LEVEL: INFO
+  INTENTGUARD_LOG_FORMAT: json
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+
+services:
+  postgres:
+    image: postgres:17.9-alpine3.23
+    environment:
+      POSTGRES_USER: intentguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intentguard-local-change-me}
+      POSTGRES_DB: intentguard
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-keycloak.sql:/docker-entrypoint-initdb.d/010-keycloak.sql:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intentguard -d intentguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.10.0-alpine3.23
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  opa:
+    image: openpolicyagent/opa:1.19.1-static
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-format=json", "/policies"]
+    volumes:
+      - ./policies:/policies:ro
+    ports: ["8181:8181"]
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--fail-defined", "http.send({\"method\":\"get\",\"url\":\"http://127.0.0.1:8181/health\"}).status_code == 200"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  keycloak:
+    build:
+      context: ./deploy/keycloak
+      dockerfile: Dockerfile
+    command: ["start", "--optimized", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-keycloak-local-change-me}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: intentguard
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-intentguard-local-change-me}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: xforwarded
+    volumes:
+      - ./deploy/keycloak/intentguard-realm.json:/opt/keycloak/data/import/intentguard-realm.json:ro
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "scripts/migrate.py"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "scripts/seed_demo.py"]
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      opa:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "intentguard.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers"]
+    environment: *backend-environment
+    ports: ["8000:8000"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 10
+    restart: unless-stopped
+
+  connector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["intentguard-booking-connector"]
+    environment:
+      <<: *backend-environment
+      INTENTGUARD_API_URL: http://gateway:8000
+      INTENTGUARD_CONNECTOR_HOST: 0.0.0.0
+      INTENTGUARD_CONNECTOR_PORT: "8100"
+      INTENTGUARD_OAUTH_TOKEN_URL: http://keycloak:8080/realms/intentguard/protocol/openid-connect/token
+      INTENTGUARD_OAUTH_CLIENT_ID: intentguard-connector
+      INTENTGUARD_OAUTH_CLIENT_SECRET: ${KEYCLOAK_CONNECTOR_CLIENT_SECRET:-intentguard-connector-local-secret}
+    ports: ["8100:8100"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 10
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    ports: ["3200:3200", "4317:4317", "4318:4318"]
+    healthcheck:
+      test: ["CMD", "/tempo", "-config.file=/etc/tempo.yml", "-verify-config"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./observability/prometheus.compose.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+      connector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-intentguard-local-change-me}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3002:3000"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./prototype
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_INTENTGUARD_API_URL: ${INTENTGUARD_PUBLIC_API_URL:-http://localhost:8000}
+    ports: ["3000:3000"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  tempo-data:
