@@ -78,8 +78,8 @@ customer authorized only refundable tickets below INR 18,000.
 
 ## Current milestone
 
-The repository contains a dependency-light Python domain core and a FastAPI
-governance gateway that demonstrate:
+The repository contains a Python policy engine and a FastAPI governance gateway
+that demonstrate:
 
 - registered-agent and action-level permissions;
 - intent-bound amount, currency, and contextual constraints;

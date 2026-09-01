@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -77,14 +78,25 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(201, intent_response.status_code)
 
     def test_container_health_endpoints_are_public_and_describe_dependencies(self) -> None:
-        live = self.client.get("/health/live", headers={"Authorization": ""})
-        ready = self.client.get("/health/ready", headers={"Authorization": ""})
+        # /health/ready reports its backing services from the environment, so
+        # the environment has to be pinned here. Inheriting it made this fail
+        # for anyone with INTENTGUARD_DATABASE_URL exported -- which is exactly
+        # what the README tells you to do for local Postgres runs.
+        with patch.dict(
+            os.environ,
+            {"INTENTGUARD_DATABASE_URL": "", "INTENTGUARD_REDIS_URL": ""},
+            clear=False,
+        ):
+            os.environ.pop("INTENTGUARD_DATABASE_URL", None)
+            os.environ.pop("INTENTGUARD_REDIS_URL", None)
+            live = self.client.get("/health/live", headers={"Authorization": ""})
+            ready = self.client.get("/health/ready", headers={"Authorization": ""})
 
-        self.assertEqual({"status": "ok"}, live.json())
-        self.assertEqual(200, ready.status_code)
-        self.assertEqual("ready", ready.json()["status"])
-        self.assertEqual("memory", ready.json()["database"])
-        self.assertEqual("memory", ready.json()["rate_limiter"])
+            self.assertEqual({"status": "ok"}, live.json())
+            self.assertEqual(200, ready.status_code)
+            self.assertEqual("ready", ready.json()["status"])
+            self.assertEqual("memory", ready.json()["database"])
+            self.assertEqual("memory", ready.json()["rate_limiter"])
 
     def action(self, request_id: str = "request-01") -> dict[str, object]:
         return {
