@@ -31,6 +31,7 @@ from intentguard import (  # noqa: E402
     PolicyEngine,
     ScriptedPlanner,
     build_planner,
+    redact_sensitive,
 )
 
 try:
@@ -446,7 +447,7 @@ class ChatCompletionsPlannerTest(unittest.TestCase):
             planner.propose("book it", intents=self.intents, history=())
         )
 
-    def test_malformed_model_output_is_dropped_rather_than_guessed_at(self) -> None:
+    def test_malformed_model_output_is_explicitly_refused(self) -> None:
         for arguments in (
             {"intent_id": "intent-flight", "action": "book_flight", "rationale": "x"},
             {"intent_id": "intent-flight", "amount": "not-a-number", "rationale": "x"},
@@ -456,9 +457,80 @@ class ChatCompletionsPlannerTest(unittest.TestCase):
                 planner = self._planner(
                     lambda request, a=arguments: self._tool_response(a)
                 )
-                self.assertIsNone(
+                with self.assertRaises(PlannerError):
                     planner.propose("book it", intents=self.intents, history=())
+                self.assertEqual("rejected", planner.last_trace.status)
+
+    def test_non_allowlisted_and_multiple_tool_calls_are_refused(self) -> None:
+        for calls, message in (
+            ([{"function": {"name": "execute_payment", "arguments": "{}"}}], "allowlisted"),
+            ([
+                {"function": {"name": "propose_action", "arguments": "{}"}},
+                {"function": {"name": "propose_action", "arguments": "{}"}},
+            ], "tool-call limit"),
+        ):
+            with self.subTest(message=message):
+                planner = self._planner(
+                    lambda request, value=calls: httpx.Response(
+                        200, json={"choices": [{"message": {"tool_calls": value}}]}
+                    )
                 )
+                with self.assertRaises(PlannerError) as raised:
+                    planner.propose("book it", intents=self.intents, history=())
+                self.assertIn(message, str(raised.exception))
+
+    def test_retry_budget_and_usage_telemetry_are_enforced(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(503, json={"error": {"message": "busy"}})
+            response = self._tool_response({
+                "intent_id": "intent-flight", "action": "book_flight",
+                "amount": "100", "rationale": "ok",
+            })
+            return httpx.Response(
+                200,
+                json={**response.json(), "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}},
+            )
+
+        planner = ChatCompletionsPlanner(
+            api_key="xai-test", transport=httpx.MockTransport(handler), sleeper=lambda _: None
+        )
+        self.assertIsNotNone(planner.propose("book", intents=self.intents, history=()))
+        self.assertEqual(2, attempts)
+        self.assertEqual(2, planner.last_trace.attempts)
+        self.assertEqual(50, planner.last_trace.total_tokens)
+
+    def test_openai_responses_adapter_uses_function_proposals(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["path"] = request.url.path
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "output": [{
+                    "type": "function_call", "name": "propose_action",
+                    "arguments": json.dumps({
+                        "intent_id": "intent-flight", "action": "book_flight",
+                        "amount": "100", "currency": "INR", "attributes": {},
+                        "risk_score": 0, "rationale": "proposal only",
+                    }),
+                }],
+                "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42},
+            })
+
+        planner = ChatCompletionsPlanner(
+            api_key="sk-test", transport=httpx.MockTransport(handler)
+        )
+        proposal = planner.propose("book", intents=self.intents, history=())
+        self.assertIsNotNone(proposal)
+        self.assertEqual("/v1/responses", captured["path"])
+        self.assertFalse(captured["body"]["store"])
+        self.assertFalse(captured["body"]["parallel_tool_calls"])
+        self.assertEqual("openai", planner.last_trace.provider)
 
     def test_a_plain_text_answer_proposes_nothing(self) -> None:
         planner = self._planner(
@@ -620,6 +692,34 @@ class PlannerSelectionTest(unittest.TestCase):
     def test_an_explicit_provider_overrides_the_key_prefix(self) -> None:
         planner = build_planner(api_key="gsk_test", provider="xai")
         self.assertEqual("xai", planner.provider.name)
+
+    def test_an_openai_key_selects_the_responses_api(self) -> None:
+        planner = build_planner(api_key="sk-test")
+        self.assertEqual("openai", planner.provider.name)
+        self.assertEqual("responses", planner.provider.api_style)
+
+
+class PlannerTelemetryTest(unittest.TestCase):
+    def test_conversation_trace_is_stable_and_raw_message_is_not_audited(self) -> None:
+        engine, now = build()
+        agent = GovernedAgent(engine, planner=ScriptedPlanner())
+        first = agent.send("book a refundable flight for 100", customer_id="alice", agent_id=AGENT_ID, now=now)
+        second = agent.send("book a refundable flight for 200", customer_id="alice", agent_id=AGENT_ID, now=now)
+        self.assertEqual(first.trace.trace_id, second.trace.trace_id)
+        telemetry = [event for event in engine.audit_ledger.events if event.event_type == "llm.proposal.completed"]
+        self.assertEqual(2, len(telemetry))
+        serialized = json.dumps([event.payload for event in telemetry], default=str)
+        self.assertNotIn("book a refundable", serialized)
+
+    def test_sensitive_values_are_redacted(self) -> None:
+        value = redact_sensitive({
+            "email": "alice@example.com",
+            "note": "contact alice@example.com card 4111 1111 1111 1111 token sk-secret123",
+        })
+        self.assertEqual("[REDACTED]", value["email"])
+        self.assertNotIn("alice@example.com", value["note"])
+        self.assertNotIn("4111", value["note"])
+        self.assertNotIn("sk-secret123", value["note"])
 
 
 if __name__ == "__main__":

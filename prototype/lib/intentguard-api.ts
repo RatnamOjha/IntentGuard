@@ -31,6 +31,13 @@ export type ApiAuthorization = {
     lease_id: string;
     expires_at: string;
     fleet_epoch: number;
+    action: string;
+    amount: string;
+    currency: string;
+    issuer: string;
+    audience: string;
+    key_id: string;
+    token: string;
   } | null;
 };
 
@@ -116,6 +123,16 @@ export type ApiRoundTripBenchmark = {
   p99: number;
 };
 
+export type ApiPolicyVersion = {
+  version_id: string;
+  source: string;
+  status: "draft" | "published" | "retired";
+  created_at: string;
+  created_by: string;
+  description: string;
+  based_on: string | null;
+};
+
 export type ActionPayload = {
   request_id: string;
   agent_id: string;
@@ -129,12 +146,24 @@ export type ActionPayload = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_INTENTGUARD_API_URL ?? "http://127.0.0.1:8000";
+const ACCESS_TOKEN = process.env.NEXT_PUBLIC_INTENTGUARD_ACCESS_TOKEN;
+const AGENT_ACCESS_TOKEN =
+  process.env.NEXT_PUBLIC_INTENTGUARD_AGENT_ACCESS_TOKEN ?? ACCESS_TOKEN;
+const OPERATOR_ACCESS_TOKEN =
+  process.env.NEXT_PUBLIC_INTENTGUARD_OPERATOR_ACCESS_TOKEN ?? ACCESS_TOKEN;
+const REVIEWER_ACCESS_TOKEN =
+  process.env.NEXT_PUBLIC_INTENTGUARD_REVIEWER_ACCESS_TOKEN ?? ACCESS_TOKEN;
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiRequest<T>(
+  path: string,
+  init?: RequestInit,
+  accessToken = ACCESS_TOKEN,
+): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...init?.headers,
     },
   });
@@ -239,10 +268,14 @@ export async function runApiRoundTripBenchmark(
 }
 
 export function authorizeAction(payload: ActionPayload) {
-  return apiRequest<ApiAuthorization>("/v1/actions/authorize", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return apiRequest<ApiAuthorization>(
+    "/v1/actions/authorize",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    AGENT_ACCESS_TOKEN,
+  );
 }
 
 export function commitAuthorization(authorization: ApiAuthorization) {
@@ -255,13 +288,16 @@ export function commitAuthorization(authorization: ApiAuthorization) {
       method: "POST",
       body: JSON.stringify({ lease_id: authorization.lease.lease_id }),
     },
+    AGENT_ACCESS_TOKEN,
   );
 }
 
 export function setAgentRevocation(agentId: string, revoked: boolean) {
-  return apiRequest(`/v1/agents/${agentId}/${revoked ? "revoke" : "restore"}`, {
-    method: "POST",
-  });
+  return apiRequest(
+    `/v1/agents/${agentId}/${revoked ? "revoke" : "restore"}`,
+    { method: "POST" },
+    OPERATOR_ACCESS_TOKEN,
+  );
 }
 
 export function updateAgentPolicy(
@@ -279,20 +315,24 @@ export function updateAgentPolicy(
       method: "PUT",
       body: JSON.stringify({
         ...policy,
-        operator: "Demo Operator",
         reason: "Policy published from the IntentGuard operator console",
       }),
     },
+    OPERATOR_ACCESS_TOKEN,
   );
 }
 
 export function setFleetStop(stopped: boolean) {
-  return apiRequest(`/v1/fleet/${stopped ? "stop" : "resume"}`, {
-    method: "POST",
-    body: stopped
-      ? JSON.stringify({ reason: "Emergency stop activated by the operator console" })
-      : undefined,
-  });
+  return apiRequest(
+    `/v1/fleet/${stopped ? "stop" : "resume"}`,
+    {
+      method: "POST",
+      body: stopped
+        ? JSON.stringify({ reason: "Emergency stop activated by the operator console" })
+        : undefined,
+    },
+    OPERATOR_ACCESS_TOKEN,
+  );
 }
 
 export function resolveApproval(requestId: string, approved: boolean) {
@@ -301,11 +341,15 @@ export function resolveApproval(requestId: string, approved: boolean) {
     {
       method: "POST",
       body: JSON.stringify({
-        reviewer: "Demo Operator",
         reason: approved
           ? "Card-member intent and transaction context verified"
           : "Risk could not be resolved by the operator",
       }),
     },
+    REVIEWER_ACCESS_TOKEN,
   );
+}
+
+export function getPolicyVersions() {
+  return apiRequest<ApiPolicyVersion[]>("/v1/policies", undefined, OPERATOR_ACCESS_TOKEN);
 }

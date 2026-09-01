@@ -1,9 +1,12 @@
 # IntentGuard architecture
 
-This diagram is the target production architecture. The first-round executable
-prototype implements the same boundaries with FastAPI, a deterministic Python
-policy engine, and in-memory state; OPA, PostgreSQL, Redis, KMS, Prometheus,
-Grafana, and Splunk remain explicitly labeled production-roadmap components.
+This diagram is the target production architecture. The executable system now
+implements FastAPI, OPA/Rego declarative decisions, Python authorization orchestration, PostgreSQL repositories,
+and Ed25519-signed intent passports with rotating public keys and durable nonce
+replay protection, OpenTelemetry tracing, Prometheus metrics, structured JSON
+logs, a Redis-backed distributed rate limiter, and a provisioned Grafana/Tempo
+stack. KMS-managed private keys, immutable external audit archive, and Splunk
+export remain roadmap components.
 
 ## System context
 
@@ -29,15 +32,17 @@ flowchart LR
     end
 
     PDP -->|"Allow / Deny / Review"| GW
-    BR --> Redis[("Redis")]
-    RV --> Redis
-    ID --> PG[("PostgreSQL")]
+    BR --> PG[("PostgreSQL")]
+    RV --> PG
+    ID --> PG
+    GW --> RL["Distributed rate limiter"]
+    RL --> Redis[("Redis")]
 
     GW -->|"Review"| HA["Human Approval Queue"]
     HA --> GW
 
     GW -->|"Allow"| KMS["Lease Signer / KMS"]
-    KMS -->|"Signed execution lease"| API["Banking and Payment Connectors"]
+    KMS -->|"Signed execution lease"| API["Protected Booking Connector"]
     API -->|"Execution result"| GW
     GW -->|"Commit / Release"| BR
 
@@ -54,9 +59,10 @@ flowchart LR
     RV -.-> AE
     HA -.-> AE
     API -.-> AE
-    AE --> ES[("Append-Only Event Store")]
+    AE --> PG
+    AE -.-> ES[("Future immutable archive")]
     AE --> OBS["Prometheus / Grafana"]
-    AE --> SPL["Splunk Export"]
+    AE -.-> SPL["Future Splunk Export"]
 ```
 
 ## Evaluation sequence
@@ -102,17 +108,18 @@ sequenceDiagram
 ### 2. Dynamic spend caps
 
 - PostgreSQL stores budget definitions and durable reconciliation data.
-- Redis performs atomic reservation, commit, and release operations.
+- PostgreSQL performs atomic reservation, commit, and release operations.
 - Supported scopes include per action, per agent, shared fleet, customer, and
   rolling time window.
 - Reservations prevent concurrent agents from collectively overspending.
 
 ### 3. Revocation and emergency stop
 
-- Redis stores per-agent revocation epochs and fleet-stop state.
+- PostgreSQL stores per-agent revocation epochs and fleet-stop state; Redis is
+  reserved for future propagation acceleration, never authoritative state.
 - Every request checks current revocation state before execution.
-- Short-lived leases carry the agent epoch so connectors can reject stale
-  authorization after a revocation.
+- Short-lived Ed25519-signed leases carry request, reservation, action, amount,
+  currency, and fleet epoch so connectors reject tampering and stale authority.
 
 ### 4. Operator dashboard
 
@@ -151,14 +158,29 @@ Every evaluation returns:
 5. Protected APIs accept requests only from the governance gateway.
 6. Revocation and the emergency stop are checked at evaluation time.
 
+## LLM proposal boundary
+
+`GovernedAgent` depends on one planner protocol. The OpenAI Responses adapter,
+xAI/Groq chat-completions adapter, and deterministic fallback all return the
+same validated proposal type. Provider responses are constrained to one
+allowlisted proposal tool, parsed through a strict Pydantic schema, and bounded
+by timeout, retry, and tool-call limits. The model never receives an execution
+tool and never determines the policy decision.
+
+Safe per-turn telemetry carries a stable conversation trace ID, model and
+prompt versions, attempts, token counts, latency, and operator-configured cost
+rates. Raw prompts are replaced by a SHA-256 fingerprint and common secrets and
+identifiers are redacted from error telemetry.
+
 ## Prototype evolution
 
-The current implementation keeps state in memory for fast iteration. The
-prototype will replace this with:
+The current implementation provides repository interfaces with in-memory and
+PostgreSQL implementations. PostgreSQL stores agents, intents, policies,
+approvals, authorizations, leases, revocations, fleet state, budget records,
+counters, and audit metadata. In-memory implementations remain for fast tests.
+The remaining evolution is:
 
-- PostgreSQL for agents, intents, policies, and approvals;
-- Redis for low-latency budgets, counters, and revocation state;
-- OPA/Rego for externally configurable policy-as-code;
-- an append-only event store for audit history;
-- FastAPI for the governance gateway;
-- React and TypeScript for the operator and reviewer interfaces.
+- expand the implemented Redis rate limiter to expiry notifications and
+  coordination that is never authoritative state;
+- move the hash-chained audit stream into immutable external archive storage;
+- move signing keys from process configuration to a managed KMS/HSM boundary.

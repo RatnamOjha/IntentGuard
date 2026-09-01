@@ -58,6 +58,13 @@ class IntentPassport:
     currency: str
     expires_at: datetime
     required_attributes: dict[str, Any] = field(default_factory=dict)
+    issuer: str = ""
+    audience: str = ""
+    issued_at: datetime | None = None
+    not_before: datetime | None = None
+    nonce: str = ""
+    key_id: str = ""
+    signature: str = ""
 
     def is_expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -81,6 +88,9 @@ class ActionRequest:
     # callers must always set it from the verified session, never from agent
     # input.
     customer_id: str | None = None
+    # Verified token subject that submitted the action. The policy engine uses
+    # this for separation of duties when a request reaches human review.
+    submitted_by: str | None = None
     occurred_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -158,6 +168,13 @@ class AuthorizationLease:
     fleet_epoch: int
     issued_at: datetime
     expires_at: datetime
+    action: str = ""
+    amount: Decimal = Decimal("0")
+    currency: str = ""
+    issuer: str = ""
+    audience: str = ""
+    key_id: str = ""
+    token: str = ""
 
     def is_expired(self, now: datetime) -> bool:
         return now >= self.expires_at

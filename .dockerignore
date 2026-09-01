@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.tools
+**/__pycache__
+**/*.pyc
+prototype/.next
+prototype/.vinext
+prototype/.wrangler
+prototype/dist
+prototype/node_modules
+docs/evidence

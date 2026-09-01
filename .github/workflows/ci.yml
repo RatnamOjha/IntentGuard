@@ -2,92 +2,170 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
-  workflow_dispatch:
 
-# Every step below exits non-zero on failure and none set `continue-on-error`,
-# so a failing test fails the build.
+permissions:
+  contents: read
+
 jobs:
-  backend:
-    name: Backend (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 3.10 is the floor declared in pyproject.toml; 3.12 is the dev version.
-        python-version: ["3.10", "3.12"]
-    # The budget ledger's correctness claim is about concurrent replicas, so it
-    # has to be tested against a real Postgres, not a stub.
+  backend-quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.8.15"
+          enable-cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install locked dependencies
+        run: uv sync --all-extras --locked
+      - name: Install checksum-verified OPA
+        run: ./scripts/install-opa.sh
+      - name: Formatting
+        run: uv run ruff format --check scripts
+      - name: Python lint
+        run: uv run ruff check --select E9,F63,F7,F82 src tests scripts
+      - name: Python type checking
+        run: uv run mypy --follow-imports=skip --ignore-missing-imports scripts/migrate.py src/intentguard/abuse.py
+      - name: Unit tests
+        env:
+          INTENTGUARD_LOG_LEVEL: WARNING
+        run: uv run python -m unittest discover -s tests -q
+      - name: Adversarial tests
+        env:
+          INTENTGUARD_LOG_LEVEL: WARNING
+        run: uv run python -m unittest -v tests.test_adversarial tests.test_abuse
+      - name: Unified evaluation harness
+        env:
+          INTENTGUARD_LOG_LEVEL: WARNING
+        run: >-
+          uv run intentguard-evaluate --iterations 100
+          --concurrent-requests 100 --connector-iterations 25
+          --approval-iterations 50
+
+  integration:
+    runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:15
+        image: postgres:17.9-alpine3.23
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: intentguard
+          POSTGRES_PASSWORD: intentguard-ci
           POSTGRES_DB: intentguard
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+          --health-cmd "pg_isready -U intentguard -d intentguard"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      INTENTGUARD_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/intentguard
-
+      INTENTGUARD_DATABASE_URL: postgresql://intentguard:intentguard-ci@127.0.0.1:5432/intentguard
+      INTENTGUARD_LOG_LEVEL: WARNING
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install the package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[api,dev,postgres]"
-
-      - name: Apply migrations
-        run: psql "$INTENTGUARD_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_budget_ledger.sql
-
-      - name: Run the Python test suite
-        run: python -m unittest discover -s tests -v
+          version: "0.8.15"
+          enable-cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: uv sync --all-extras --locked
+      - name: Database migrations
+        run: uv run python scripts/migrate.py
+      - name: Integration tests
+        run: >-
+          uv run python -m unittest -v
+          tests.test_budget_ledger
+          tests.test_persistence
+          tests.test_signed_intents
+          tests.test_booking_connector
 
   frontend:
-    name: Frontend (operator console)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: prototype
-    env:
-      WRANGLER_SEND_METRICS: "false"
-      WRANGLER_LOG_PATH: .wrangler/wrangler.log
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          version: 10
+          node-version: "24.17.0"
+      - run: corepack enable
+      - run: corepack pnpm@11.24.0 install --frozen-lockfile
+      - name: Frontend lint
+        run: corepack pnpm@11.24.0 lint
+      - name: Frontend type checking
+        run: corepack pnpm@11.24.0 typecheck
+      - name: Frontend build and rendered HTML test
+        run: corepack pnpm@11.24.0 test
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+  security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
-          node-version: "22.13"
-          cache: pnpm
-          cache-dependency-path: prototype/pnpm-lock.yaml
+          version: "0.8.15"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.17.0"
+      - run: uv sync --all-extras --locked
+      - name: Python dependency audit
+        run: >-
+          uv export --all-extras --no-emit-project --no-hashes --output-file requirements-audit.txt
+          && uv run pip-audit --requirement requirements-audit.txt --no-deps
+          --disable-pip --vulnerability-service osv --progress-spinner off
+      - name: Bandit high-severity scan
+        run: uv run bandit -q -lll -r src scripts -x tests
+      - name: Semgrep security scan
+        run: >-
+          uvx --with setuptools==80.9.0 --from semgrep==1.136.0
+          semgrep scan --config p/python --error src scripts
+      - name: Frontend dependency audit
+        working-directory: prototype
+        run: corepack pnpm@11.24.0 audit --audit-level high
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # Mirrors the frontend half of scripts/test-all.sh.
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Type-check
-        run: pnpm run typecheck
-
-      - name: Build and run the render test
-        run: pnpm test
+  containers:
+    needs: [backend-quality, integration, frontend, security]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Compose model
+        run: docker compose config --quiet
+      - name: Build gateway image
+        run: docker build --tag intentguard-gateway:${{ github.sha }} .
+      - name: Build frontend image
+        run: docker build --tag intentguard-frontend:${{ github.sha }} prototype
+      - name: Trivy gateway scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: intentguard-gateway:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Trivy frontend scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: intentguard-frontend:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Trivy repository and IaC scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL

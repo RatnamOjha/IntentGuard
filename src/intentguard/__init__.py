@@ -5,13 +5,31 @@ from .agent import (
     ChatCompletionsPlanner,
     GovernedAgent,
     PlannerError,
+    PlannerTrace,
     Provider,
     ProposedAction,
     ScriptedPlanner,
     build_planner,
+    redact_sensitive,
 )
 from .audit import AuditLedger, LedgerCheckpoint
 from .config import load_env_file
+from .intent import (
+    InMemoryIntentKeyRegistry,
+    InMemoryNonceStore,
+    IntentReplayError,
+    IntentSigningKey,
+    IntentVerificationError,
+    IntentVerifier,
+    encode_public_key,
+    sign_passport,
+)
+from .execution_lease import (
+    ExecutionLeaseSigner,
+    ExecutionLeaseVerifier,
+    InMemoryLeaseKeyRegistry,
+    LeaseVerificationError,
+)
 from .models import (
     ActionRequest,
     AgentProfile,
@@ -27,6 +45,14 @@ from .models import (
     RiskAssessment,
 )
 from .policy_engine import PolicyEngine
+from .policy import (
+    InMemoryPolicyRepository,
+    OpaCliPolicyEvaluator,
+    PolicyDecision,
+    PolicyEvaluationError,
+    PolicyService,
+    PolicyVersion,
+)
 
 __all__ = [
     "ActionRequest",
@@ -43,14 +69,34 @@ __all__ = [
     "GovernedAgent",
     "HumanApproval",
     "IntentPassport",
+    "IntentReplayError",
+    "IntentSigningKey",
+    "IntentVerificationError",
+    "IntentVerifier",
+    "InMemoryIntentKeyRegistry",
+    "InMemoryNonceStore",
+    "ExecutionLeaseSigner",
+    "ExecutionLeaseVerifier",
+    "InMemoryLeaseKeyRegistry",
+    "LeaseVerificationError",
     "load_env_file",
     "LedgerCheckpoint",
     "PlannerError",
+    "PlannerTrace",
     "PolicyEngine",
+    "PolicyDecision",
+    "PolicyEvaluationError",
+    "PolicyService",
+    "PolicyVersion",
+    "OpaCliPolicyEvaluator",
+    "InMemoryPolicyRepository",
     "Provider",
     "ProposedAction",
     "ScriptedPlanner",
     "build_planner",
+    "redact_sensitive",
     "ReservationStatus",
     "RiskAssessment",
+    "encode_public_key",
+    "sign_passport",
 ]
