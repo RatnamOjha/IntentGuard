@@ -1,0 +1,37 @@
+# Trivy suppressions.
+#
+# Every entry must be scoped to a path, carry a justification, and set an
+# expiry. An entry without an expiry is an alarm that has been switched off
+# permanently, which is worse than no alarm at all.
+#
+# Review process: when an entry expires, CI goes red again and we re-decide.
+# Do not extend an expiry without re-reading the advisory.
+
+vulnerabilities:
+  - id: CVE-2026-56854
+    paths:
+      - "usr/local/bin/opa"
+    # golang.org/x/crypto/ssh: authentication bypass because source-address
+    # restrictions in authorized_keys are not enforced.
+    #
+    # Why this is not reachable here:
+    #   * The finding is in the OPA binary we copy from openpolicyagent/opa,
+    #     not in our own code. OPA is a policy evaluator invoked over localhost
+    #     HTTP; it runs no SSH server and reads no authorized_keys file, so the
+    #     vulnerable code path cannot be entered.
+    #   * Trivy matches Go binaries on module version from the build graph, not
+    #     on linked symbols, so a transitive x/crypto dependency is reported
+    #     whether or not the ssh subpackage is actually reachable.
+    #
+    # Why we are not simply upgrading:
+    #   The fix landed in golang.org/x/crypto 0.55.0. No released OPA ships it
+    #   yet -- 1.19.1 (our pin) has 0.53.0, and 1.20.1, the newest release, has
+    #   0.54.0. Verified against each release's go.mod.
+    #
+    # To remove this: bump the OPA base image in Dockerfile to the first
+    # release whose go.mod shows golang.org/x/crypto >= 0.55.0, then delete
+    # this entry.
+    statement: >-
+      Not reachable: OPA is a policy evaluator with no SSH server. Awaiting an
+      OPA release built against golang.org/x/crypto >= 0.55.0.
+    expired_at: 2026-10-15

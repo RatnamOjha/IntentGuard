@@ -151,10 +151,14 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: HIGH,CRITICAL
+          # Path-scoped, justified and dated. Entries expire so a suppression
+          # cannot quietly become permanent.
+          trivyignores: .trivyignore.yaml
       - name: Trivy frontend scan
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: intentguard-frontend:${{ github.sha }}
+          trivyignores: .trivyignore.yaml
           format: table
           exit-code: "1"
           ignore-unfixed: true
