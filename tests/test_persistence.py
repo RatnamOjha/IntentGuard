@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 import sys
 import unittest
@@ -203,3 +204,176 @@ class PostgresStateRepositoryTest(SharedStateContract, unittest.TestCase):
 
     def unique_id(self, prefix: str) -> str:
         return f"{prefix}-{uuid.uuid4().hex}"
+
+
+# ---------------------------------------------------------------------------
+# Idempotency across replicas
+#
+# authorize_action reads the stored authorization for a request_id and, on a
+# miss, issues a fresh reservation and lease. The engine's RLock makes that
+# check-then-act atomic within one process and does nothing across two, which
+# is the deployment the project documents. Threads cannot show this; only
+# separate OS processes sharing one database can.
+# ---------------------------------------------------------------------------
+
+IDEMPOTENCY_WORKERS = 8
+
+
+def _same_request_worker(  # noqa: ANN001
+    barrier, results, database_url: str, agent_id: str, intent_id: str, request_id: str
+) -> None:
+    """One replica authorizing the request_id every other replica is authorizing."""
+
+    from intentguard.audit import PostgresAuditLedger
+    from intentguard.budget import PostgresBudgetLedger
+    from intentguard.models import ActionRequest
+    from intentguard.persistence import PostgresStateRepository
+    from intentguard.policy_engine import PolicyEngine
+
+    engine = PolicyEngine(
+        budget_ledger=PostgresBudgetLedger(database_url),
+        state_repository=PostgresStateRepository(database_url),
+        audit_ledger=PostgresAuditLedger(database_url),
+    )
+    try:
+        request = ActionRequest(
+            request_id=request_id,
+            agent_id=agent_id,
+            action="pay",
+            amount=Decimal("100"),
+            currency="INR",
+            intent_id=intent_id,
+            risk_score=1,
+            customer_id="customer-1",
+            occurred_at=NOW,
+        )
+        barrier.wait()
+        result = engine.authorize_action(request, now=NOW)
+        results.append(
+            (
+                result.decision.decision.value,
+                result.lease.lease_id if result.lease is not None else None,
+                (
+                    result.reservation.reservation_id
+                    if result.reservation is not None
+                    else None
+                ),
+            )
+        )
+    except Exception as exc:  # a crash is a result worth seeing, not a hang
+        results.append(("error", type(exc).__name__, str(exc)[:120]))
+    finally:
+        engine.close()
+
+
+@unittest.skipUnless(
+    postgres_available(), "PostgreSQL governance migration is unavailable"
+)
+class ConcurrentIdempotencyTest(unittest.TestCase):
+    """One request_id must buy exactly one reservation, however many replicas ask."""
+
+    def setUp(self) -> None:
+        from intentguard.budget import PostgresBudgetLedger
+
+        suffix = uuid.uuid4().hex
+        self.agent_id = f"idem-agent-{suffix}"
+        self.intent_id = f"idem-intent-{suffix}"
+        self.request_id = f"idem-request-{suffix}"
+
+        self.repository = PostgresStateRepository(DATABASE_URL)
+        self.budget = PostgresBudgetLedger(DATABASE_URL)
+        self.addCleanup(self.repository.close)
+        self.addCleanup(self.budget.close)
+
+        engine = PolicyEngine(
+            state_repository=self.repository, budget_ledger=self.budget
+        )
+        engine.register_agent(
+            AgentProfile(
+                agent_id=self.agent_id,
+                name="Idempotency Agent",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("1000"),
+                # Deliberately far above 8 x 100, so a duplicate is not masked
+                # by the cap refusing it. The cap is not what is under test.
+                daily_budget=Decimal("1000000"),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                intent_id=self.intent_id,
+                customer_id="customer-1",
+                agent_id=self.agent_id,
+                action="pay",
+                max_amount=Decimal("1000"),
+                currency="INR",
+                expires_at=NOW + timedelta(hours=1),
+            )
+        )
+
+    def _race(self) -> list[tuple]:
+        context = mp.get_context("spawn")
+        with context.Manager() as manager:
+            results = manager.list()
+            barrier = manager.Barrier(IDEMPOTENCY_WORKERS)
+            processes = [
+                context.Process(
+                    target=_same_request_worker,
+                    args=(
+                        barrier,
+                        results,
+                        DATABASE_URL,
+                        self.agent_id,
+                        self.intent_id,
+                        self.request_id,
+                    ),
+                )
+                for _ in range(IDEMPOTENCY_WORKERS)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=120)
+            for process in processes:
+                self.assertEqual(0, process.exitcode, "A replica crashed.")
+            return list(results)
+
+    def _reservations(self) -> list[tuple]:
+        import psycopg
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            return connection.execute(
+                "SELECT reservation_id, status, amount FROM reservations "
+                "WHERE request_id = %s ORDER BY reservation_id",
+                (self.request_id,),
+            ).fetchall()
+
+    def test_one_request_id_buys_one_reservation_across_replicas(self) -> None:
+        outcomes = self._race()
+
+        self.assertEqual(IDEMPOTENCY_WORKERS, len(outcomes))
+        self.assertTrue(
+            all(outcome[0] == "allow" for outcome in outcomes),
+            f"Every replica should have been allowed: {outcomes}",
+        )
+
+        held = [row for row in self._reservations() if row[1] == "held"]
+        self.assertEqual(
+            1,
+            len(held),
+            f"One request_id held {len(held)} reservations: {held}",
+        )
+
+        leases = {outcome[1] for outcome in outcomes}
+        self.assertEqual(
+            1,
+            len(leases),
+            f"One request_id handed out {len(leases)} distinct leases: {leases}",
+        )
+
+    def test_duplicate_authorizations_do_not_hold_extra_budget(self) -> None:
+        """Eight replicas asking for 100 must hold 100, not 800."""
+
+        self._race()
+        exposure = self.budget.exposure(self.agent_id, NOW.date())
+        self.assertEqual(Decimal("100"), exposure.reserved)

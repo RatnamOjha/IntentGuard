@@ -949,6 +949,9 @@ class PolicyEngine:
                 approved_decision,
                 evaluation_time=resolution_time,
                 lease_ttl=lease_ttl,
+                # The REVIEW record for this request_id is already ours; this
+                # replaces it rather than claiming it.
+                claim=False,
             )
             self._persist_state_unlocked()
             return result
@@ -1024,8 +1027,14 @@ class PolicyEngine:
         *,
         evaluation_time: datetime,
         lease_ttl: timedelta,
+        claim: bool = True,
     ) -> AuthorizationResult:
-        """Reserve budget and issue a lease while the engine lock is held."""
+        """Reserve budget and issue a lease while the engine lock is held.
+
+        ``claim`` asks for exclusive ownership of the request_id before the
+        reservation is kept. Pass ``False`` only when the caller already owns
+        the record and is replacing it, as :meth:`approve_action` does.
+        """
 
         expires_at = evaluation_time + lease_ttl
         budget_date = evaluation_time.date()
@@ -1067,9 +1076,6 @@ class PolicyEngine:
         )
         if self.lease_signer is not None:
             lease = self.lease_signer.sign(lease)
-        self._authorization_counts[(request.agent_id, budget_date)] += 1
-        self._leases[lease.lease_id] = lease
-
         decision = replace(
             decision,
             remaining_daily_budget=max(
@@ -1082,6 +1088,17 @@ class PolicyEngine:
             reservation=reservation,
             lease=lease,
         )
+        # The idempotency check at the top of authorize_action read state that
+        # another replica may have written since. Claiming the request_id is
+        # the only indivisible point in this flow, so it decides who keeps the
+        # reservation.
+        if claim and not self._claim_authorization_unlocked(request, result):
+            return self._yield_duplicate_unlocked(
+                request, reservation, now=evaluation_time
+            )
+
+        self._authorization_counts[(request.agent_id, budget_date)] += 1
+        self._leases[lease.lease_id] = lease
         self._authorizations[request.request_id] = (request, result)
         self.audit_ledger.append(
             "budget.reserved",
@@ -1096,6 +1113,69 @@ class PolicyEngine:
             },
         )
         return result
+
+    def _claim_authorization_unlocked(
+        self, request: ActionRequest, result: AuthorizationResult
+    ) -> bool:
+        """Whether this replica won exclusive ownership of the request_id."""
+
+        if self.state_repository is None:
+            # No shared store, so a single process by construction and the
+            # engine lock is already the whole guard.
+            return request.request_id not in self._authorizations
+        return self.state_repository.claim_authorization(
+            request.request_id, request, result
+        )
+
+    def _yield_duplicate_unlocked(
+        self,
+        request: ActionRequest,
+        reservation: BudgetReservation,
+        *,
+        now: datetime,
+    ) -> AuthorizationResult:
+        """Give back a reservation that lost the race, and return the winner's.
+
+        Losing means another replica authorized this exact request_id while we
+        were evaluating it. Ours is the duplicate: the funds go back, and the
+        caller receives the authorization that won, so a retried request_id
+        resolves to one reservation and one lease no matter how many replicas
+        answered it.
+        """
+
+        self.budget_ledger.release(
+            reservation.reservation_id,
+            now=now,
+            reason="duplicate_authorization",
+        )
+        winner = (
+            self.state_repository.get_authorization(request.request_id)
+            if self.state_repository is not None
+            else self._authorizations.get(request.request_id)
+        )
+        if winner is None:
+            # The winner's row vanished between losing the claim and reading
+            # it. Refusing is the only safe answer: we released our hold, so
+            # returning any result here would hand out an unfunded lease.
+            raise ValueError(
+                "The request was authorized concurrently and its record could "
+                "not be read back."
+            )
+        self._authorizations[request.request_id] = winner
+        self.audit_ledger.append(
+            "authorization.duplicate_released",
+            {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "released_reservation_id": reservation.reservation_id,
+                "winning_reservation_id": (
+                    winner[1].reservation.reservation_id
+                    if winner[1].reservation is not None
+                    else None
+                ),
+            },
+        )
+        return winner[1]
 
     @staticmethod
     def _conflicting_fields(

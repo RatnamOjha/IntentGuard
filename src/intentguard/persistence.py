@@ -57,6 +57,29 @@ class StateRepository(Protocol):
 
     def save(self, state: GovernanceState) -> None: ...
 
+    def claim_authorization(
+        self,
+        request_id: str,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Take exclusive ownership of ``request_id``, atomically.
+
+        Returns ``True`` if this caller stored the record and ``False`` if some
+        other replica got there first. This is the whole guard behind
+        idempotency across replicas: ``load()`` and ``save()`` are a
+        read-modify-write, so two replicas can both miss the same request and
+        both issue a reservation for it. One indivisible insert is what makes
+        one request_id mean one reservation.
+        """
+        ...
+
+    def get_authorization(
+        self, request_id: str
+    ) -> tuple[ActionRequest, AuthorizationResult] | None:
+        """Read one stored authorization without loading the whole table."""
+        ...
+
     def close(self) -> None: ...
 
 
@@ -93,6 +116,31 @@ class InMemoryStateRepository:
     def save(self, state: GovernanceState) -> None:
         with self._lock:
             self._state = deepcopy(state)
+
+    def claim_authorization(
+        self,
+        request_id: str,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        with self._lock:
+            if self._state is None:
+                # No save() has happened yet, so nothing can have claimed it.
+                # The version is a placeholder; the next save() overwrites it.
+                self._state = empty_state("")
+            if request_id in self._state.authorizations:
+                return False
+            self._state.authorizations[request_id] = deepcopy((request, result))
+            return True
+
+    def get_authorization(
+        self, request_id: str
+    ) -> tuple[ActionRequest, AuthorizationResult] | None:
+        with self._lock:
+            if self._state is None:
+                return None
+            stored = self._state.authorizations.get(request_id)
+            return None if stored is None else deepcopy(stored)
 
     def close(self) -> None:
         return None
@@ -234,6 +282,46 @@ class PostgresStateRepository:
                 state.approvals[request_id] = _decode(payload)
         self._baseline = deepcopy(state)
         return state
+
+    def claim_authorization(
+        self,
+        request_id: str,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Insert the record only if nobody else has, in one statement.
+
+        ``ON CONFLICT DO NOTHING ... RETURNING`` yields a row to exactly one
+        caller under concurrency; every other caller gets nothing back and
+        knows it lost. ``save()`` writes the same row again later with
+        identical content, which is a harmless no-op.
+        """
+
+        from psycopg.types.json import Jsonb
+
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO authorization_records
+                    (request_id, request_payload, result_payload)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (request_id) DO NOTHING
+                RETURNING request_id
+                """,
+                (request_id, Jsonb(_encode(request)), Jsonb(_encode(result))),
+            ).fetchone()
+        return row is not None
+
+    def get_authorization(
+        self, request_id: str
+    ) -> tuple[ActionRequest, AuthorizationResult] | None:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                "SELECT request_payload, result_payload FROM authorization_records "
+                "WHERE request_id = %s",
+                (request_id,),
+            ).fetchone()
+        return None if row is None else (_decode(row[0]), _decode(row[1]))
 
     def save(self, state: GovernanceState) -> None:
         from psycopg.types.json import Jsonb
