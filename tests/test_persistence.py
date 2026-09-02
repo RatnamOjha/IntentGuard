@@ -601,3 +601,227 @@ class ConcurrentApprovalTest(unittest.TestCase):
             f"events, by {reviewers}",
         )
         self.assertEqual(resolved.reviewer, reviewers[0])
+
+
+# ---------------------------------------------------------------------------
+# Counters and epochs across replicas
+#
+# Every numeric field in GovernanceState is incremented as a read-modify-write
+# in Python and merged on save. Two replicas that each read N and write N+1
+# leave N+1 where N+2 happened. Threads cannot show this; separate OS processes
+# sharing one database can.
+# ---------------------------------------------------------------------------
+
+COUNTER_WORKERS = 8
+
+
+def _counter_worker(barrier, results, database_url, kind, agent_id, intent_id):  # noqa: ANN001
+    """One replica performing a single increment of the named counter."""
+
+    from intentguard.audit import PostgresAuditLedger
+    from intentguard.budget import PostgresBudgetLedger
+    from intentguard.models import ActionRequest
+    from intentguard.persistence import PostgresStateRepository
+    from intentguard.policy_engine import PolicyEngine
+
+    engine = PolicyEngine(
+        budget_ledger=PostgresBudgetLedger(database_url),
+        state_repository=PostgresStateRepository(database_url),
+        audit_ledger=PostgresAuditLedger(database_url),
+    )
+    try:
+        barrier.wait()
+        if kind == "authorization_count":
+            outcome = engine.authorize_action(
+                ActionRequest(
+                    request_id=f"count-{uuid.uuid4().hex}",
+                    agent_id=agent_id,
+                    action="pay",
+                    amount=Decimal("1"),
+                    currency="INR",
+                    intent_id=intent_id,
+                    risk_score=0,
+                    customer_id="customer-1",
+                    occurred_at=NOW,
+                ),
+                now=NOW,
+            )
+            results.append(("ok", outcome.decision.decision.value))
+        elif kind == "fleet_epoch":
+            engine.stop_fleet(reason="counter race")
+            results.append(("ok", engine.fleet_epoch))
+        elif kind == "policy_revision":
+            engine.update_agent_policy(
+                agent_id,
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("1000"),
+                daily_budget=Decimal("1000000"),
+                active=True,
+                operator=f"operator-{os.getpid()}",
+                reason="counter race",
+                now=NOW,
+            )
+            results.append(("ok", engine.policy_version))
+        elif kind == "revocation_epoch":
+            engine.revoke_agent(agent_id)
+            results.append(("ok", agent_id))
+    except Exception as exc:
+        results.append(("error", f"{type(exc).__name__}: {str(exc)[:100]}"))
+    finally:
+        engine.close()
+
+
+@unittest.skipUnless(
+    postgres_available(), "PostgreSQL governance migration is unavailable"
+)
+class ConcurrentCounterTest(unittest.TestCase):
+    """N concurrent increments must leave N, not 1."""
+
+    def setUp(self) -> None:
+        from intentguard.budget import PostgresBudgetLedger
+
+        suffix = uuid.uuid4().hex
+        self.agent_id = f"count-agent-{suffix}"
+        self.intent_id = f"count-intent-{suffix}"
+
+        self.repository = PostgresStateRepository(DATABASE_URL)
+        self.budget = PostgresBudgetLedger(DATABASE_URL)
+        self.addCleanup(self.repository.close)
+        self.addCleanup(self.budget.close)
+
+        engine = PolicyEngine(
+            state_repository=self.repository, budget_ledger=self.budget
+        )
+        engine.register_agent(
+            AgentProfile(
+                agent_id=self.agent_id,
+                name="Counter Agent",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("1000"),
+                daily_budget=Decimal("1000000"),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                intent_id=self.intent_id,
+                customer_id="customer-1",
+                agent_id=self.agent_id,
+                action="pay",
+                max_amount=Decimal("1000"),
+                currency="INR",
+                expires_at=NOW + timedelta(hours=1),
+            )
+        )
+
+    def _race(self, kind: str) -> list[tuple]:
+        context = mp.get_context("spawn")
+        with context.Manager() as manager:
+            results = manager.list()
+            barrier = manager.Barrier(COUNTER_WORKERS)
+            processes = [
+                context.Process(
+                    target=_counter_worker,
+                    args=(
+                        barrier,
+                        results,
+                        DATABASE_URL,
+                        kind,
+                        self.agent_id,
+                        self.intent_id,
+                    ),
+                )
+                for _ in range(COUNTER_WORKERS)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=120)
+            for process in processes:
+                self.assertEqual(0, process.exitcode, "A replica crashed.")
+            outcomes = list(results)
+        errors = [item for item in outcomes if item[0] == "error"]
+        self.assertEqual([], errors, f"No replica should have failed: {errors}")
+        return outcomes
+
+    @staticmethod
+    def _scalar(query: str, parameters: tuple) -> object:
+        import psycopg
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return None if row is None else row[0]
+
+    def test_authorization_count_sums_concurrent_increments(self) -> None:
+        """The velocity counter feeds risk scoring, so undercounting hides risk."""
+
+        self._race("authorization_count")
+
+        stored = self._scalar(
+            "SELECT authorization_count FROM authorization_counters "
+            "WHERE agent_id = %s AND budget_date = %s",
+            (self.agent_id, NOW.date()),
+        )
+        self.assertEqual(
+            COUNTER_WORKERS,
+            stored,
+            f"{COUNTER_WORKERS} authorizations counted as {stored}.",
+        )
+
+    def test_fleet_epoch_sums_concurrent_stops(self) -> None:
+        """A collapsed epoch lets a lease survive the stop that should void it."""
+
+        before = self._scalar(
+            "SELECT fleet_epoch FROM governance_metadata WHERE singleton = TRUE", ()
+        )
+        # Leave the shared database usable for every test that follows.
+        self.addCleanup(
+            PolicyEngine(
+                state_repository=PostgresStateRepository(DATABASE_URL),
+                budget_ledger=self.budget,
+            ).resume_fleet
+        )
+
+        self._race("fleet_epoch")
+
+        after = self._scalar(
+            "SELECT fleet_epoch FROM governance_metadata WHERE singleton = TRUE", ()
+        )
+        self.assertEqual(
+            (before or 0) + COUNTER_WORKERS,
+            after,
+            f"{COUNTER_WORKERS} fleet stops moved the epoch from {before} to {after}.",
+        )
+
+    def test_policy_revision_sums_concurrent_updates(self) -> None:
+        """Two policies sharing one version string cannot be told apart later."""
+
+        before = self._scalar(
+            "SELECT policy_revision FROM governance_metadata WHERE singleton = TRUE",
+            (),
+        )
+
+        self._race("policy_revision")
+
+        after = self._scalar(
+            "SELECT policy_revision FROM governance_metadata WHERE singleton = TRUE",
+            (),
+        )
+        self.assertEqual(
+            (before or 0) + COUNTER_WORKERS,
+            after,
+            f"{COUNTER_WORKERS} policy updates moved the revision from "
+            f"{before} to {after}.",
+        )
+
+    def test_revocation_epoch_sums_concurrent_revocations(self) -> None:
+        self._race("revocation_epoch")
+
+        stored = self._scalar(
+            "SELECT revocation_epoch FROM agent_revocations WHERE agent_id = %s",
+            (self.agent_id,),
+        )
+        self.assertEqual(
+            COUNTER_WORKERS,
+            stored,
+            f"{COUNTER_WORKERS} revocations counted as {stored}.",
+        )

@@ -103,6 +103,30 @@ class StateRepository(Protocol):
         """Read one approval without loading the whole table."""
         ...
 
+    # -- Counters and epochs ------------------------------------------------
+    #
+    # Every one of these is a read-modify-write when done in Python, and
+    # save() merges the result, so two replicas that each read N and write
+    # N+1 leave N+1 where N+2 happened. Each is therefore advanced by a single
+    # statement that reads and writes inside the database, and returns the
+    # authoritative value for the caller to adopt.
+
+    def increment_authorization_count(self, agent_id: str, day: date) -> int:
+        """Add one to an agent's authorization count for a day."""
+        ...
+
+    def next_fleet_epoch(self, *, policy_version: str) -> int:
+        """Stop the fleet and advance its epoch by exactly one."""
+        ...
+
+    def next_revocation_epoch(self, agent_id: str) -> int:
+        """Advance one agent's revocation epoch by exactly one."""
+        ...
+
+    def next_policy_revision(self, *, version_prefix: str) -> tuple[int, str]:
+        """Advance the policy revision and its derived version string together."""
+        ...
+
     def close(self) -> None: ...
 
 
@@ -188,6 +212,40 @@ class InMemoryStateRepository:
                 return None
             stored = self._state.approvals.get(request_id)
             return None if stored is None else deepcopy(stored)
+
+    def _mutable_state(self) -> GovernanceState:
+        if self._state is None:
+            self._state = empty_state("")
+        return self._state
+
+    def increment_authorization_count(self, agent_id: str, day: date) -> int:
+        with self._lock:
+            state = self._mutable_state()
+            updated = state.authorization_counts.get((agent_id, day), 0) + 1
+            state.authorization_counts[(agent_id, day)] = updated
+            return updated
+
+    def next_fleet_epoch(self, *, policy_version: str) -> int:
+        with self._lock:
+            state = self._mutable_state()
+            state.fleet_stopped = True
+            state.fleet_epoch += 1
+            return state.fleet_epoch
+
+    def next_revocation_epoch(self, agent_id: str) -> int:
+        with self._lock:
+            state = self._mutable_state()
+            updated = state.revocation_epochs.get(agent_id, 0) + 1
+            state.revocation_epochs[agent_id] = updated
+            state.revoked_agents.add(agent_id)
+            return updated
+
+    def next_policy_revision(self, *, version_prefix: str) -> tuple[int, str]:
+        with self._lock:
+            state = self._mutable_state()
+            state.policy_revision += 1
+            state.policy_version = f"{version_prefix}{state.policy_revision}"
+            return state.policy_revision, state.policy_version
 
     def close(self) -> None:
         return None
@@ -429,6 +487,91 @@ class PostgresStateRepository:
             ).fetchone()
         return None if row is None else _decode(row[0])
 
+    def increment_authorization_count(self, agent_id: str, day: date) -> int:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO authorization_counters
+                    (agent_id, budget_date, authorization_count)
+                VALUES (%s, %s, 1)
+                ON CONFLICT (agent_id, budget_date) DO UPDATE SET
+                    authorization_count =
+                        authorization_counters.authorization_count + 1
+                RETURNING authorization_count
+                """,
+                (agent_id, day),
+            ).fetchone()
+        return int(row[0])
+
+    def next_fleet_epoch(self, *, policy_version: str) -> int:
+        """Stop the fleet, advancing the epoch by one inside the database.
+
+        The epoch must never repeat. ``commit_reservation`` refuses a lease
+        whose stamped epoch differs from the current one, so two stops that
+        collapsed onto the same number would let a lease issued between them
+        survive the second stop.
+        """
+
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO governance_metadata
+                    (singleton, policy_version, policy_revision,
+                     fleet_stopped, fleet_epoch)
+                VALUES (TRUE, %s, 0, TRUE, 1)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    fleet_stopped = TRUE,
+                    fleet_epoch = governance_metadata.fleet_epoch + 1,
+                    updated_at = now()
+                RETURNING fleet_epoch
+                """,
+                (policy_version,),
+            ).fetchone()
+        return int(row[0])
+
+    def next_revocation_epoch(self, agent_id: str) -> int:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO agent_revocations (agent_id, revocation_epoch)
+                VALUES (%s, 1)
+                ON CONFLICT (agent_id) DO UPDATE SET
+                    revocation_epoch = agent_revocations.revocation_epoch + 1,
+                    revoked_at = now()
+                RETURNING revocation_epoch
+                """,
+                (agent_id,),
+            ).fetchone()
+        return int(row[0])
+
+    def next_policy_revision(self, *, version_prefix: str) -> tuple[int, str]:
+        """Advance the revision and rebuild its version string in one statement.
+
+        The two are written together because they are one fact. Bumping the
+        number in the database while composing the string in Python lets a
+        slower replica store a version that disagrees with the revision beside
+        it, and a decision's recorded policy_version is how an auditor
+        identifies which policy applied.
+        """
+
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO governance_metadata
+                    (singleton, policy_version, policy_revision,
+                     fleet_stopped, fleet_epoch)
+                VALUES (TRUE, %(prefix)s || '1', 1, FALSE, 0)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    policy_revision = governance_metadata.policy_revision + 1,
+                    policy_version = %(prefix)s ||
+                        (governance_metadata.policy_revision + 1)::text,
+                    updated_at = now()
+                RETURNING policy_revision, policy_version
+                """,
+                {"prefix": version_prefix},
+            ).fetchone()
+        return int(row[0]), str(row[1])
+
     def save(self, state: GovernanceState) -> None:
         from psycopg.types.json import Jsonb
 
@@ -473,7 +616,10 @@ class PostgresStateRepository:
                         INSERT INTO agent_revocations (agent_id, revocation_epoch)
                         VALUES (%s, %s)
                         ON CONFLICT (agent_id) DO UPDATE SET
-                            revocation_epoch = EXCLUDED.revocation_epoch,
+                            revocation_epoch = GREATEST(
+                                agent_revocations.revocation_epoch,
+                                EXCLUDED.revocation_epoch
+                            ),
                             revoked_at = now()
                         """,
                         changed_revocations,
@@ -527,9 +673,18 @@ class PostgresStateRepository:
             """
         ).fetchone()
         merged = list(row or previous)
-        for index, (old, new) in enumerate(zip(previous, desired)):
-            if old != new:
-                merged[index] = new
+        # Monotonic values are advanced by their own single-statement updates
+        # and must never move backwards here. A replica whose snapshot is one
+        # behind would otherwise undo a peer's increment simply by saving last.
+        if baseline.fleet_stopped != state.fleet_stopped:
+            merged[2] = state.fleet_stopped
+        merged[3] = max(merged[3], state.fleet_epoch)
+        # policy_version is derived from policy_revision, so the pair moves
+        # together or not at all; writing one without the other would leave a
+        # version string that disagrees with the revision beside it.
+        if state.policy_revision > merged[1]:
+            merged[1] = state.policy_revision
+            merged[0] = state.policy_version
         connection.execute(
             """
             INSERT INTO governance_metadata

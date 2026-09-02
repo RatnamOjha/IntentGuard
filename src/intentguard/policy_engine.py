@@ -251,8 +251,9 @@ class PolicyEngine:
             )
             self._agents[agent_id] = updated
             self._sync_agent_unlocked(updated)
-            self._policy_revision += 1
-            self.policy_version = f"2026.07.r{self._policy_revision}"
+            self._policy_revision, self.policy_version = (
+                self._next_policy_revision_unlocked()
+            )
             self.audit_ledger.append(
                 "policy.updated",
                 {
@@ -360,13 +361,11 @@ class PolicyEngine:
             self._refresh_state_unlocked()
             self._revoked_agents.add(agent_id)
             self._revocation_epochs[agent_id] = (
-                self._revocation_epochs.get(agent_id, 0) + 1
+                self._next_revocation_epoch_unlocked(agent_id)
             )
             self.audit_ledger.append("agent.revoked", {"agent_id": agent_id})
             for reservation in self.budget_ledger.held(agent_id):
-                self._release_reservation_unlocked(
-                    reservation, reason="agent_revoked"
-                )
+                self._release_if_held_unlocked(reservation, reason="agent_revoked")
             self._persist_state_unlocked()
 
     def restore_agent(self, agent_id: str) -> None:
@@ -388,15 +387,13 @@ class PolicyEngine:
         with self._lock:
             self._refresh_state_unlocked()
             self._fleet_stopped = True
-            self._fleet_epoch += 1
+            self._fleet_epoch = self._next_fleet_epoch_unlocked()
             self.audit_ledger.append(
                 "fleet.stopped",
                 {"reason": reason, "fleet_epoch": self._fleet_epoch},
             )
             for reservation in self.budget_ledger.held():
-                self._release_reservation_unlocked(
-                    reservation, reason="fleet_stopped"
-                )
+                self._release_if_held_unlocked(reservation, reason="fleet_stopped")
             self._persist_state_unlocked()
 
     def resume_fleet(self) -> None:
@@ -1109,7 +1106,11 @@ class PolicyEngine:
                 request, reservation, now=evaluation_time
             )
 
-        self._authorization_counts[(request.agent_id, budget_date)] += 1
+        self._authorization_counts[(request.agent_id, budget_date)] = (
+            self._increment_authorization_count_unlocked(
+                request.agent_id, budget_date
+            )
+        )
         self._leases[lease.lease_id] = lease
         self._authorizations[request.request_id] = (request, result)
         self.audit_ledger.append(
@@ -1125,6 +1126,68 @@ class PolicyEngine:
             },
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Counters and epochs
+    #
+    # Each of these was a read-modify-write in Python whose result save()
+    # merged, so concurrent replicas lost increments. The repository now
+    # advances each value in one database statement and returns the
+    # authoritative result. Without a repository there is a single process by
+    # construction, and the engine lock is already sufficient.
+    # ------------------------------------------------------------------
+
+    POLICY_VERSION_PREFIX = "2026.07.r"
+
+    def _increment_authorization_count_unlocked(
+        self, agent_id: str, day: date
+    ) -> int:
+        if self.state_repository is None:
+            self._authorization_counts[(agent_id, day)] += 1
+            return self._authorization_counts[(agent_id, day)]
+        return self.state_repository.increment_authorization_count(agent_id, day)
+
+    def _next_fleet_epoch_unlocked(self) -> int:
+        if self.state_repository is None:
+            return self._fleet_epoch + 1
+        return self.state_repository.next_fleet_epoch(
+            policy_version=self.policy_version
+        )
+
+    def _next_revocation_epoch_unlocked(self, agent_id: str) -> int:
+        if self.state_repository is None:
+            return self._revocation_epochs.get(agent_id, 0) + 1
+        return self.state_repository.next_revocation_epoch(agent_id)
+
+    def _next_policy_revision_unlocked(self) -> tuple[int, str]:
+        if self.state_repository is None:
+            revision = self._policy_revision + 1
+            return revision, f"{self.POLICY_VERSION_PREFIX}{revision}"
+        return self.state_repository.next_policy_revision(
+            version_prefix=self.POLICY_VERSION_PREFIX
+        )
+
+    def _release_if_held_unlocked(
+        self, reservation: BudgetReservation | LedgerReservation, *, reason: str
+    ) -> bool:
+        """Release a hold, tolerating a replica that got there first.
+
+        A fleet stop and a revocation both sweep every hold they can see. Two
+        replicas sweeping at once will each try to release the same
+        reservations, and the loser must not abort the sweep: an exception here
+        propagates before the stop is persisted, which would leave the audit
+        trail saying the fleet stopped while the database still says it is
+        running.
+        """
+
+        try:
+            self._release_reservation_unlocked(reservation, reason=reason)
+        except (ValueError, KeyError):
+            # Already committed, released or expired by another replica. The
+            # hold is off the books either way, which is all the sweep wanted,
+            # and whoever resolved it recorded its own audit event.
+            return False
+        return True
 
     def _claim_approval_unlocked(
         self,
