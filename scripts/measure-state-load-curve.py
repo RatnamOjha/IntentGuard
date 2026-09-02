@@ -8,6 +8,7 @@ measures the cost of that design against accumulated history.
 Seeds by duplicating genuine payloads produced by a real authorize call, so
 row widths are realistic rather than invented.
 """
+
 from __future__ import annotations
 
 import os
@@ -19,7 +20,9 @@ from decimal import Decimal
 
 import psycopg
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+)
 
 from intentguard.audit import PostgresAuditLedger
 from intentguard.budget import PostgresBudgetLedger
@@ -50,8 +53,7 @@ def grow_to(target):
     """Duplicate the seed record/lease rows until each table holds `target`."""
     with psycopg.connect(URL, autocommit=True) as c:
         for table, cols, key in (
-            ("authorization_records",
-             "request_payload, result_payload", "request_id"),
+            ("authorization_records", "request_payload, result_payload", "request_id"),
             ("authorization_leases", "payload", "lease_id"),
         ):
             current = c.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
@@ -84,35 +86,54 @@ def main():
     engine = build_engine()
     now = datetime.now(timezone.utc)
 
-    engine.register_agent(AgentProfile(
-        agent_id="curve-agent", name="Curve", allowed_actions=frozenset({"refund"}),
-        max_action_amount=Decimal("500"), daily_budget=Decimal("100000000"),
-    ))
-    engine.register_intent(IntentPassport(
-        intent_id="curve-intent", customer_id="curve-customer",
-        agent_id="curve-agent", action="refund",
-        max_amount=Decimal("500"), currency="GBP",
-        expires_at=now + timedelta(days=365),
-    ))
+    engine.register_agent(
+        AgentProfile(
+            agent_id="curve-agent",
+            name="Curve",
+            allowed_actions=frozenset({"refund"}),
+            max_action_amount=Decimal("500"),
+            daily_budget=Decimal("100000000"),
+        )
+    )
+    engine.register_intent(
+        IntentPassport(
+            intent_id="curve-intent",
+            customer_id="curve-customer",
+            agent_id="curve-agent",
+            action="refund",
+            max_amount=Decimal("500"),
+            currency="GBP",
+            expires_at=now + timedelta(days=365),
+        )
+    )
 
     counter = {"n": 0}
 
     def authorize_once():
         counter["n"] += 1
-        engine.authorize_action(ActionRequest(
-            request_id=f"curve-req-{counter['n']}-{time.time_ns()}",
-            agent_id="curve-agent", customer_id="curve-customer",
-            intent_id="curve-intent", action="refund", risk_score=0,
-            amount=Decimal("1"), currency="GBP",
-        ))
+        engine.authorize_action(
+            ActionRequest(
+                request_id=f"curve-req-{counter['n']}-{time.time_ns()}",
+                agent_id="curve-agent",
+                customer_id="curve-customer",
+                intent_id="curve-intent",
+                action="refund",
+                risk_score=0,
+                amount=Decimal("1"),
+                currency="GBP",
+            )
+        )
 
     authorize_once()  # produce genuine payloads to duplicate
 
     repo = PostgresStateRepository(URL)
     audit = PostgresAuditLedger(URL)
 
-    print(f"{'rows/table':>11} {'load() ms':>11} {'authorize ms':>13} "
-          f"{'audit events':>13} {'audit/status ms':>16}", flush=True)
+    print(
+        f"{'rows/table':>11} {'load() ms':>11} {'authorize ms':>13} "
+        f"{'audit events':>13} {'audit/status ms':>16}",
+        flush=True,
+    )
     print("-" * 68, flush=True)
 
     for target in STEPS:
@@ -121,12 +142,18 @@ def main():
 
         def authorize_at_n():
             counter["n"] += 1
-            engine_at_n.authorize_action(ActionRequest(
-                request_id=f"curve-req-{counter['n']}-{time.time_ns()}",
-                agent_id="curve-agent", customer_id="curve-customer",
-                intent_id="curve-intent", action="refund", risk_score=0,
-                amount=Decimal("1"), currency="GBP",
-            ))
+            engine_at_n.authorize_action(
+                ActionRequest(
+                    request_id=f"curve-req-{counter['n']}-{time.time_ns()}",
+                    agent_id="curve-agent",
+                    customer_id="curve-customer",
+                    intent_id="curve-intent",
+                    action="refund",
+                    risk_score=0,
+                    amount=Decimal("1"),
+                    currency="GBP",
+                )
+            )
 
         load_ms = median_ms(lambda: repo.load(default_policy_version="2026.07"))
         auth_ms = median_ms(authorize_at_n)
@@ -141,9 +168,12 @@ def main():
         status_ms = median_ms(audit_status, repeats=3)
         engine_at_n.close()
 
-        print(f"{rows('authorization_records'):>11,} {load_ms:>11.1f} "
-              f"{auth_ms:>13.1f} {rows('audit_events'):>13,} "
-              f"{status_ms:>16.1f}", flush=True)
+        print(
+            f"{rows('authorization_records'):>11,} {load_ms:>11.1f} "
+            f"{auth_ms:>13.1f} {rows('audit_events'):>13,} "
+            f"{status_ms:>16.1f}",
+            flush=True,
+        )
 
     repo.close()
     audit.close()
