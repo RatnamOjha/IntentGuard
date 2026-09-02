@@ -80,6 +80,29 @@ class StateRepository(Protocol):
         """Read one stored authorization without loading the whole table."""
         ...
 
+    def claim_approval_transition(
+        self,
+        request_id: str,
+        approval: HumanApproval,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Move a pending approval to its resolved state, atomically.
+
+        Returns ``True`` if this caller performed the transition and ``False``
+        if the approval was no longer pending. The resolved approval and its
+        authorization result are written together, so a caller that loses can
+        immediately read back a state the winner has already committed --
+        resolving the approval first and storing the result afterwards would
+        leave a window where the row says ``approved`` while the stored
+        authorization is still the superseded review.
+        """
+        ...
+
+    def get_approval(self, request_id: str) -> HumanApproval | None:
+        """Read one approval without loading the whole table."""
+        ...
+
     def close(self) -> None: ...
 
 
@@ -140,6 +163,30 @@ class InMemoryStateRepository:
             if self._state is None:
                 return None
             stored = self._state.authorizations.get(request_id)
+            return None if stored is None else deepcopy(stored)
+
+    def claim_approval_transition(
+        self,
+        request_id: str,
+        approval: HumanApproval,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        with self._lock:
+            if self._state is None:
+                return False
+            current = self._state.approvals.get(request_id)
+            if current is None or current.status is not ApprovalStatus.PENDING:
+                return False
+            self._state.approvals[request_id] = deepcopy(approval)
+            self._state.authorizations[request_id] = deepcopy((request, result))
+            return True
+
+    def get_approval(self, request_id: str) -> HumanApproval | None:
+        with self._lock:
+            if self._state is None:
+                return None
+            stored = self._state.approvals.get(request_id)
             return None if stored is None else deepcopy(stored)
 
     def close(self) -> None:
@@ -322,6 +369,65 @@ class PostgresStateRepository:
                 (request_id,),
             ).fetchone()
         return None if row is None else (_decode(row[0]), _decode(row[1]))
+
+    def claim_approval_transition(
+        self,
+        request_id: str,
+        approval: HumanApproval,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Resolve a pending approval and store its authorization in one go.
+
+        The conditional UPDATE is the whole guard: under READ COMMITTED a
+        second caller blocks on the row until the first commits, then
+        re-evaluates the predicate against the committed row, finds the status
+        is no longer pending, and matches zero rows. Because the authorization
+        record is written inside the same transaction, by the time a loser is
+        told it lost, the winner's result is already readable.
+        """
+
+        from psycopg.types.json import Jsonb
+
+        with self._pool.connection() as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    UPDATE approval_requests
+                       SET payload = %s, updated_at = now()
+                     WHERE request_id = %s
+                       AND payload -> 'status' ->> 'value' = %s
+                    RETURNING request_id
+                    """,
+                    (
+                        Jsonb(_encode(approval)),
+                        request_id,
+                        ApprovalStatus.PENDING.value,
+                    ),
+                ).fetchone()
+                if row is None:
+                    return False
+                connection.execute(
+                    """
+                    INSERT INTO authorization_records
+                        (request_id, request_payload, result_payload)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (request_id) DO UPDATE SET
+                        request_payload = EXCLUDED.request_payload,
+                        result_payload = EXCLUDED.result_payload,
+                        updated_at = now()
+                    """,
+                    (request_id, Jsonb(_encode(request)), Jsonb(_encode(result))),
+                )
+        return True
+
+    def get_approval(self, request_id: str) -> HumanApproval | None:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                "SELECT payload FROM approval_requests WHERE request_id = %s",
+                (request_id,),
+            ).fetchone()
+        return None if row is None else _decode(row[0])
 
     def save(self, state: GovernanceState) -> None:
         from psycopg.types.json import Jsonb

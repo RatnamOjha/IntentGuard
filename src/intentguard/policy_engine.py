@@ -928,13 +928,31 @@ class PolicyEngine:
                     ),
                 ),
             )
-            self._approvals[request_id] = replace(
+            resolved = replace(
                 approval,
                 status=ApprovalStatus.APPROVED,
                 reviewer=reviewer,
                 reason=reason,
                 resolved_at=resolution_time,
             )
+            result = self._issue_authorization_unlocked(
+                request,
+                approved_decision,
+                evaluation_time=resolution_time,
+                lease_ttl=lease_ttl,
+                # The REVIEW record for this request_id is already ours; this
+                # replaces it rather than claiming it. Ownership of the
+                # resolution is settled by the approval transition below.
+                claim=False,
+            )
+            # The status read at the top of this method may be stale by now.
+            # Only the caller that moves the row out of PENDING keeps what it
+            # just issued.
+            if not self._claim_approval_unlocked(resolved, request, result):
+                return self._yield_resolved_approval_unlocked(
+                    request_id, request, result, now=resolution_time
+                )
+            self._approvals[request_id] = resolved
             self.audit_ledger.append(
                 "approval.approved",
                 {
@@ -943,15 +961,6 @@ class PolicyEngine:
                     "reviewer": reviewer,
                     "reason": reason,
                 },
-            )
-            result = self._issue_authorization_unlocked(
-                request,
-                approved_decision,
-                evaluation_time=resolution_time,
-                lease_ttl=lease_ttl,
-                # The REVIEW record for this request_id is already ours; this
-                # replaces it rather than claiming it.
-                claim=False,
             )
             self._persist_state_unlocked()
             return result
@@ -996,10 +1005,7 @@ class PolicyEngine:
                     ),
                 ),
             )
-            self._authorizations[request_id] = (
-                request,
-                AuthorizationResult(decision=rejected_decision),
-            )
+            rejected_result = AuthorizationResult(decision=rejected_decision)
             rejected = replace(
                 approval,
                 status=ApprovalStatus.REJECTED,
@@ -1007,6 +1013,12 @@ class PolicyEngine:
                 reason=reason,
                 resolved_at=resolution_time,
             )
+            # Same transition guard as approve_action, so a concurrent approve
+            # and reject of one request_id cannot both succeed and leave a
+            # rejected request holding a live lease.
+            if not self._claim_approval_unlocked(rejected, request, rejected_result):
+                return self._reread_resolved_approval_unlocked(request_id)
+            self._authorizations[request_id] = (request, rejected_result)
             self._approvals[request_id] = rejected
             self.audit_ledger.append(
                 "approval.rejected",
@@ -1113,6 +1125,87 @@ class PolicyEngine:
             },
         )
         return result
+
+    def _claim_approval_unlocked(
+        self,
+        approval: HumanApproval,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Whether this replica performed the pending-to-resolved transition."""
+
+        if self.state_repository is None:
+            # No shared store, so a single process by construction. The status
+            # was checked under the engine lock and cannot have moved since.
+            return True
+        return self.state_repository.claim_approval_transition(
+            approval.request_id, approval, request, result
+        )
+
+    def _reread_resolved_approval_unlocked(self, request_id: str) -> HumanApproval:
+        """Return the approval as the caller that won the transition left it.
+
+        Applies the same status rules as the top of the resolution methods, so
+        losing a race reads exactly like arriving after the winner had already
+        finished.
+        """
+
+        self._refresh_state_unlocked()
+        resolved = self._approvals.get(request_id)
+        if resolved is None:
+            raise ValueError(
+                "The approval was resolved concurrently and could not be read "
+                "back."
+            )
+        if resolved.status is ApprovalStatus.APPROVED:
+            raise ValueError("The approval request has already been approved.")
+        return resolved
+
+    def _yield_resolved_approval_unlocked(
+        self,
+        request_id: str,
+        request: ActionRequest,
+        result: AuthorizationResult,
+        *,
+        now: datetime,
+    ) -> AuthorizationResult:
+        """Give back what this replica issued and return the winner's outcome.
+
+        Nothing this replica did was persisted -- the reservation is the only
+        durable trace -- so releasing it and reloading state discards the lease,
+        the counter increment and the authorization record in one step.
+        """
+
+        if result.reservation is not None:
+            self.budget_ledger.release(
+                result.reservation.reservation_id,
+                now=now,
+                reason="duplicate_approval",
+            )
+        self._refresh_state_unlocked()
+        resolved = self._approvals.get(request_id)
+        if resolved is not None and resolved.status is ApprovalStatus.REJECTED:
+            raise ValueError("The approval request has already been rejected.")
+        winner = self._authorizations.get(request_id)
+        if winner is None:
+            raise ValueError(
+                "The approval was resolved concurrently and its authorization "
+                "could not be read back."
+            )
+        self.audit_ledger.append(
+            "approval.duplicate_released",
+            {
+                "request_id": request_id,
+                "agent_id": request.agent_id,
+                "released_reservation_id": (
+                    result.reservation.reservation_id
+                    if result.reservation is not None
+                    else None
+                ),
+                "winning_reviewer": resolved.reviewer if resolved else None,
+            },
+        )
+        return winner[1]
 
     def _claim_authorization_unlocked(
         self, request: ActionRequest, result: AuthorizationResult
