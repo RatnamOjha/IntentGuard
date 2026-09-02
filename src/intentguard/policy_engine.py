@@ -384,21 +384,48 @@ class PolicyEngine:
             self._persist_state_unlocked()
 
     def stop_fleet(self, *, reason: str) -> None:
+        """Halt the fleet. The durable stop happens before anything records it.
+
+        Order matters here and is the whole point of this method's shape. The
+        stop is made durable first, and only then written to the ledger, so an
+        audit trail that says the fleet stopped cannot outlive a stop that
+        never landed. Everything after the durable write is best-effort
+        cleanup: it may fail, and the fleet stays stopped either way, which is
+        the safe direction for a kill switch.
+        """
+
         with self._lock:
             self._refresh_state_unlocked()
+            # Durable first. If this raises, nothing has been claimed and
+            # nothing has been recorded.
+            epoch = self._next_fleet_epoch_unlocked()
             self._fleet_stopped = True
-            self._fleet_epoch = self._next_fleet_epoch_unlocked()
+            self._fleet_epoch = epoch
             self.audit_ledger.append(
                 "fleet.stopped",
-                {"reason": reason, "fleet_epoch": self._fleet_epoch},
+                {"reason": reason, "fleet_epoch": epoch},
             )
             for reservation in self.budget_ledger.held():
                 self._release_if_held_unlocked(reservation, reason="fleet_stopped")
             self._persist_state_unlocked()
 
     def resume_fleet(self) -> None:
+        """Lift a fleet stop, unless a newer stop has landed since we looked.
+
+        Resuming is a compare-and-set against the fleet epoch, which is the
+        version number of the stopped state. If another replica stopped the
+        fleet between this call reading state and writing it, the resume is
+        refused rather than silently cancelling that stop.
+        """
+
         with self._lock:
             self._refresh_state_unlocked()
+            if not self._resume_fleet_unlocked(self._fleet_epoch):
+                raise ValueError(
+                    "The fleet was stopped again while this resume was in "
+                    "flight. The newer stop stands; re-read the fleet status "
+                    "and resume again if that is still what you want."
+                )
             self._fleet_stopped = False
             self.audit_ledger.append(
                 "fleet.resumed", {"fleet_epoch": self._fleet_epoch}
@@ -1153,6 +1180,11 @@ class PolicyEngine:
         return self.state_repository.next_fleet_epoch(
             policy_version=self.policy_version
         )
+
+    def _resume_fleet_unlocked(self, expected_epoch: int) -> bool:
+        if self.state_repository is None:
+            return True
+        return self.state_repository.resume_fleet(expected_epoch=expected_epoch)
 
     def _next_revocation_epoch_unlocked(self, agent_id: str) -> int:
         if self.state_repository is None:

@@ -119,6 +119,15 @@ class StateRepository(Protocol):
         """Stop the fleet and advance its epoch by exactly one."""
         ...
 
+    def resume_fleet(self, *, expected_epoch: int) -> bool:
+        """Clear the fleet stop, but only if no newer stop has landed.
+
+        Returns ``False`` when the epoch has moved since the caller read it,
+        which means the fleet was stopped again and this resume is acting on a
+        stale view. Stopping is the safe direction, so the newer stop wins.
+        """
+        ...
+
     def next_revocation_epoch(self, agent_id: str) -> int:
         """Advance one agent's revocation epoch by exactly one."""
         ...
@@ -161,8 +170,34 @@ class InMemoryStateRepository:
             return deepcopy(self._state)
 
     def save(self, state: GovernanceState) -> None:
+        """Store the snapshot without regressing anything advanced atomically.
+
+        Mirrors the merge rules PostgresStateRepository applies. The two
+        implementations are differentially tested against one shared contract,
+        so a snapshot that can undo an increment here but not there would make
+        the in-memory reference wrong rather than merely simpler.
+        """
+
         with self._lock:
-            self._state = deepcopy(state)
+            merged = deepcopy(state)
+            current = self._state
+            if current is not None:
+                # Both stop and resume are atomic operations of their own, so
+                # a snapshot never carries authority over the flag.
+                merged.fleet_stopped = current.fleet_stopped
+                merged.fleet_epoch = max(current.fleet_epoch, state.fleet_epoch)
+                if current.policy_revision > state.policy_revision:
+                    merged.policy_revision = current.policy_revision
+                    merged.policy_version = current.policy_version
+                for agent_id, epoch in current.revocation_epochs.items():
+                    merged.revocation_epochs[agent_id] = max(
+                        epoch, merged.revocation_epochs.get(agent_id, 0)
+                    )
+                for key, count in current.authorization_counts.items():
+                    merged.authorization_counts[key] = max(
+                        count, merged.authorization_counts.get(key, 0)
+                    )
+            self._state = merged
 
     def claim_authorization(
         self,
@@ -231,6 +266,14 @@ class InMemoryStateRepository:
             state.fleet_stopped = True
             state.fleet_epoch += 1
             return state.fleet_epoch
+
+    def resume_fleet(self, *, expected_epoch: int) -> bool:
+        with self._lock:
+            state = self._mutable_state()
+            if state.fleet_epoch != expected_epoch:
+                return False
+            state.fleet_stopped = False
+            return True
 
     def next_revocation_epoch(self, agent_id: str) -> int:
         with self._lock:
@@ -529,6 +572,26 @@ class PostgresStateRepository:
             ).fetchone()
         return int(row[0])
 
+    def resume_fleet(self, *, expected_epoch: int) -> bool:
+        """Clear the stop only while the epoch still matches what was read.
+
+        The epoch is the version number of the fleet's stopped state. Matching
+        it means no stop has landed since the caller looked, so clearing the
+        flag cannot silently undo one.
+        """
+
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                """
+                UPDATE governance_metadata
+                   SET fleet_stopped = FALSE, updated_at = now()
+                 WHERE singleton = TRUE AND fleet_epoch = %s
+                RETURNING fleet_epoch
+                """,
+                (expected_epoch,),
+            ).fetchone()
+        return row is not None
+
     def next_revocation_epoch(self, agent_id: str) -> int:
         with self._pool.connection() as connection:
             row = connection.execute(
@@ -676,8 +739,10 @@ class PostgresStateRepository:
         # Monotonic values are advanced by their own single-statement updates
         # and must never move backwards here. A replica whose snapshot is one
         # behind would otherwise undo a peer's increment simply by saving last.
-        if baseline.fleet_stopped != state.fleet_stopped:
-            merged[2] = state.fleet_stopped
+        # fleet_stopped is deliberately NOT merged here. Both directions are
+        # atomic operations of their own -- next_fleet_epoch sets it, and
+        # resume_fleet clears it only while the epoch is unchanged. Letting a
+        # snapshot write it would let a stale save undo a stop.
         merged[3] = max(merged[3], state.fleet_epoch)
         # policy_version is derived from policy_revision, so the pair moves
         # together or not at all; writing one without the other would leave a

@@ -825,3 +825,226 @@ class ConcurrentCounterTest(unittest.TestCase):
             stored,
             f"{COUNTER_WORKERS} revocations counted as {stored}.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Fleet stop durability and stop-wins resume
+#
+# These are fault-injection tests, not concurrency tests: the failure is
+# injected directly, so they are deterministic and run without a database.
+# ---------------------------------------------------------------------------
+
+
+class _FailingEpochRepository(InMemoryStateRepository):
+    """A repository whose durable fleet stop always fails."""
+
+    def next_fleet_epoch(self, *, policy_version: str) -> int:
+        raise RuntimeError("the database is unreachable")
+
+
+class _StopBetweenReadAndWriteRepository(InMemoryStateRepository):
+    """Lets exactly one extra fleet stop land after a caller reads state.
+
+    Simulates another replica stopping the fleet in the window between this
+    replica's refresh and its write, without needing two processes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.arm_after_next_load = False
+
+    def load(self, *, default_policy_version: str):  # noqa: ANN201
+        state = super().load(default_policy_version=default_policy_version)
+        if self.arm_after_next_load:
+            self.arm_after_next_load = False
+            super().next_fleet_epoch(policy_version=default_policy_version)
+        return state
+
+
+class _ReleaseFailingLedger(InMemoryBudgetLedger):
+    """A ledger whose release always fails for an unrecoverable reason."""
+
+    def release(self, reservation_id, *, now, reason="released"):  # noqa: ANN001,ANN201
+        raise RuntimeError("the ledger is unreachable")
+
+
+class FleetStopDurabilityTest(unittest.TestCase):
+    """A stop must be durable before it is recorded, and never undone by a save."""
+
+    @staticmethod
+    def _fleet_events(engine: PolicyEngine, event_type: str) -> list:
+        return [
+            event
+            for event in engine.audit_ledger.events
+            if event.event_type == event_type
+        ]
+
+    def test_failed_durable_stop_records_nothing(self) -> None:
+        """The ledger entry must not outlive a stop that never landed."""
+
+        engine = PolicyEngine(
+            state_repository=_FailingEpochRepository(),
+            budget_ledger=InMemoryBudgetLedger(),
+        )
+
+        with self.assertRaises(RuntimeError):
+            engine.stop_fleet(reason="incident")
+
+        self.assertEqual([], self._fleet_events(engine, "fleet.stopped"))
+        self.assertFalse(
+            engine.fleet_stopped,
+            "A stop that failed to persist must not appear to have happened.",
+        )
+
+    def test_stop_survives_a_failing_release_sweep(self) -> None:
+        """Cleanup after the durable stop is best effort; the stop still stands."""
+
+        repository = InMemoryStateRepository()
+        engine = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        engine.register_agent(
+            AgentProfile(
+                agent_id="sweep-agent",
+                name="Sweep",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("100"),
+                daily_budget=Decimal("1000"),
+            )
+        )
+        engine.budget_ledger.reserve(
+            "res-sweep",
+            request_id="req-sweep",
+            agent_id="sweep-agent",
+            amount=Decimal("10"),
+            currency="INR",
+            budget_date=NOW.date(),
+            expires_at=NOW + timedelta(minutes=5),
+        )
+        # Swap in a ledger that cannot release, keeping the outstanding hold.
+        failing = _ReleaseFailingLedger()
+        failing._agents = engine.budget_ledger._agents
+        failing._days = engine.budget_ledger._days
+        failing._reservations = engine.budget_ledger._reservations
+        engine.budget_ledger = failing
+
+        with self.assertRaises(RuntimeError):
+            engine.stop_fleet(reason="incident")
+
+        # The durable stop happened before the sweep, so it stands.
+        self.assertTrue(engine.fleet_stopped)
+        self.assertEqual(1, len(self._fleet_events(engine, "fleet.stopped")))
+
+    def test_a_stale_save_cannot_undo_a_stop(self) -> None:
+        """A replica writing a snapshot taken before a stop must not clear it.
+
+        Every mutating method refreshes before it writes, so the window is
+        between that refresh and the save. The repository injects a stop into
+        exactly that window, which is what a second replica would do.
+        """
+
+        repository = _StopBetweenReadAndWriteRepository()
+        engine = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        self.assertFalse(engine.fleet_stopped)
+
+        # register_agent reloads, then another replica stops the fleet, then
+        # register_agent saves a snapshot that still says the fleet is running.
+        repository.arm_after_next_load = True
+        engine.register_agent(
+            AgentProfile(
+                agent_id="stale-agent",
+                name="Stale",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("100"),
+                daily_budget=Decimal("1000"),
+            )
+        )
+
+        fresh = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        self.assertTrue(
+            fresh.fleet_stopped,
+            "A snapshot save cleared a fleet stop it never knew about.",
+        )
+        self.assertEqual(1, fresh.fleet_epoch)
+
+
+class FleetResumeCompareAndSetTest(unittest.TestCase):
+    """Resume is a compare-and-set on the epoch, so a newer stop wins."""
+
+    def test_resume_is_refused_when_a_newer_stop_landed(self) -> None:
+        repository = _StopBetweenReadAndWriteRepository()
+        engine = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        engine.stop_fleet(reason="first incident")
+
+        # The next refresh inside resume_fleet sees the epoch it is about to
+        # act on, and another stop lands immediately afterwards.
+        repository.arm_after_next_load = True
+
+        with self.assertRaises(ValueError) as caught:
+            engine.resume_fleet()
+        self.assertIn("stopped again", str(caught.exception))
+
+        fresh = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        self.assertTrue(
+            fresh.fleet_stopped, "The newer stop should have survived the resume."
+        )
+
+    def test_resume_succeeds_when_nothing_moved(self) -> None:
+        repository = InMemoryStateRepository()
+        engine = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        engine.stop_fleet(reason="incident")
+        self.assertTrue(engine.fleet_stopped)
+
+        engine.resume_fleet()
+
+        self.assertFalse(engine.fleet_stopped)
+        fresh = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        self.assertFalse(fresh.fleet_stopped)
+
+    def test_resume_does_not_lower_the_epoch(self) -> None:
+        repository = InMemoryStateRepository()
+        engine = PolicyEngine(
+            state_repository=repository, budget_ledger=InMemoryBudgetLedger()
+        )
+        engine.stop_fleet(reason="one")
+        engine.resume_fleet()
+        engine.stop_fleet(reason="two")
+
+        self.assertEqual(2, engine.fleet_epoch)
+
+
+@unittest.skipUnless(
+    postgres_available(), "PostgreSQL governance migration is unavailable"
+)
+class PostgresFleetCompareAndSetTest(unittest.TestCase):
+    """The same compare-and-set, asserted against the real SQL."""
+
+    def setUp(self) -> None:
+        self.repository = PostgresStateRepository(DATABASE_URL)
+        self.addCleanup(self.repository.close)
+
+    def test_resume_matches_only_the_expected_epoch(self) -> None:
+        epoch = self.repository.next_fleet_epoch(policy_version="2026.07")
+        self.addCleanup(self.repository.resume_fleet, expected_epoch=epoch + 1)
+
+        self.assertFalse(
+            self.repository.resume_fleet(expected_epoch=epoch - 1),
+            "A resume citing a superseded epoch must not match.",
+        )
+        # A newer stop moves the epoch, so the original resume no longer applies.
+        newer = self.repository.next_fleet_epoch(policy_version="2026.07")
+        self.assertEqual(epoch + 1, newer)
+        self.assertFalse(self.repository.resume_fleet(expected_epoch=epoch))
+        self.assertTrue(self.repository.resume_fleet(expected_epoch=newer))
