@@ -386,7 +386,26 @@ class PostgresStateRepository:
 
     def load(self, *, default_policy_version: str) -> GovernanceState:
         state = empty_state(default_policy_version)
-        with self._pool.connection() as connection:
+        with self._pool.connection() as connection, connection.transaction():
+            # The eight reads below must describe one instant. The pool runs in
+            # autocommit, so without this every statement takes its own
+            # snapshot and a writer committing mid-load is seen by the later
+            # statements but not the earlier ones -- a torn snapshot.
+            #
+            # The damaging pair is authorization_records (read seventh) and
+            # approval_requests (read eighth): claim_approval_transition writes
+            # both in one transaction, so a tear between them yields a resolved
+            # approval beside its own pre-resolution authorization record, and
+            # approve_action's early return hands the caller the stale REVIEW.
+            #
+            # A transaction alone is not enough. Under READ COMMITTED each
+            # statement still re-snapshots, so the tear survives; REPEATABLE
+            # READ is what pins all eight statements to one snapshot. It has to
+            # be the first statement in the transaction, and it is scoped to
+            # this transaction rather than the session, so a pooled connection
+            # is handed back unmodified. The transaction is read-only, so it
+            # cannot raise a serialization failure and needs no retry.
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             metadata = connection.execute(
                 "SELECT policy_version, policy_revision, fleet_stopped, fleet_epoch "
                 "FROM governance_metadata WHERE singleton = TRUE"

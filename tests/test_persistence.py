@@ -1135,3 +1135,321 @@ class EncodingRegistryTest(unittest.TestCase):
             ),
         )
         self.assertEqual(finding, _decode(_encode(finding)))
+
+
+class _TearInjectingConnection:
+    """Proxies a psycopg connection and fires a hook mid-``load()``.
+
+    The hook runs immediately after the ``authorization_records`` SELECT and
+    before the ``approval_requests`` SELECT -- exactly the window in which a
+    concurrent ``claim_approval_transition`` commits both rows. It makes the
+    torn read deterministic instead of something to race for.
+    """
+
+    NEEDLE = "FROM authorization_records"
+
+    def __init__(self, inner, hook) -> None:
+        self._inner = inner
+        self._hook = hook
+        self._fired = False
+
+    def execute(self, query, *args, **kwargs):
+        cursor = self._inner.execute(query, *args, **kwargs)
+        if not self._fired and self.NEEDLE in str(query):
+            self._fired = True
+            # Materialise before the writer commits: under the old code the
+            # rows are already this statement's own snapshot.
+            rows = cursor.fetchall()
+            self._hook()
+            return iter(rows)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _HookedPool:
+    """Hands ``load()`` a proxied connection, once."""
+
+    def __init__(self, inner, hook) -> None:
+        self._inner = inner
+        self._hook = hook
+
+    def connection(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def wrapped():
+            with self._inner.connection() as connection:
+                yield _TearInjectingConnection(connection, self._hook)
+
+        return wrapped()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+@unittest.skipUnless(
+    postgres_available(), "PostgreSQL governance migration is unavailable"
+)
+class LoadSnapshotConsistencyTest(unittest.TestCase):
+    """``load()`` must return one instant, not eight."""
+
+    def setUp(self) -> None:
+        from intentguard.budget import PostgresBudgetLedger
+
+        suffix = uuid.uuid4().hex
+        self.agent_id = f"tear-agent-{suffix}"
+        self.intent_id = f"tear-intent-{suffix}"
+        self.request_id = f"tear-request-{suffix}"
+
+        self.repository = PostgresStateRepository(DATABASE_URL)
+        self.budget = PostgresBudgetLedger(DATABASE_URL)
+        self.addCleanup(self.repository.close)
+        self.addCleanup(self.budget.close)
+
+        engine = PolicyEngine(
+            state_repository=self.repository, budget_ledger=self.budget
+        )
+        engine.register_agent(
+            AgentProfile(
+                agent_id=self.agent_id,
+                name="Tear Agent",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("1000"),
+                daily_budget=Decimal("1000000"),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                intent_id=self.intent_id,
+                customer_id="customer-1",
+                agent_id=self.agent_id,
+                action="pay",
+                max_amount=Decimal("1000"),
+                currency="INR",
+                expires_at=NOW + timedelta(hours=1),
+            )
+        )
+        review = ActionRequest(
+            request_id=self.request_id,
+            agent_id=self.agent_id,
+            action="pay",
+            amount=Decimal("100"),
+            currency="INR",
+            intent_id=self.intent_id,
+            risk_score=100,
+            customer_id="customer-1",
+            submitted_by="agent-user",
+            occurred_at=NOW,
+        )
+        outcome = engine.authorize_action(review, now=NOW)
+        self.assertEqual(Decision.REVIEW, outcome.decision.decision)
+
+    def _resolve_from_another_replica(self) -> None:
+        """A second replica approves, committing both rows in one transaction."""
+
+        from intentguard.budget import PostgresBudgetLedger
+
+        other_repo = PostgresStateRepository(DATABASE_URL)
+        other_budget = PostgresBudgetLedger(DATABASE_URL)
+        try:
+            other = PolicyEngine(
+                state_repository=other_repo, budget_ledger=other_budget
+            )
+            other.approve_action(
+                self.request_id,
+                reviewer="other-replica",
+                reason="approved mid-load",
+                now=NOW + timedelta(minutes=1),
+            )
+        finally:
+            other_repo.close()
+            other_budget.close()
+
+    def test_load_cannot_mix_a_resolved_approval_with_its_stale_record(self) -> None:
+        """The snapshot must not show APPROVED beside its pre-approval record.
+
+        Fires a real approval from another replica in the window between
+        ``load()`` reading authorization_records and reading approval_requests.
+        Under READ COMMITTED (or plain autocommit) the two disagree, and
+        ``approve_action``'s early return would then hand a caller the
+        superseded REVIEW result.
+        """
+
+        original_pool = self.repository._pool
+        self.repository._pool = _HookedPool(
+            original_pool, self._resolve_from_another_replica
+        )
+        try:
+            state = self.repository.load(default_policy_version="2026.07")
+        finally:
+            self.repository._pool = original_pool
+
+        approval = state.approvals.get(self.request_id)
+        record = state.authorizations.get(self.request_id)
+        self.assertIsNotNone(approval, "The seeded approval must be in the snapshot.")
+        self.assertIsNotNone(record, "The seeded record must be in the snapshot.")
+        assert approval is not None and record is not None
+
+        if approval.status is ApprovalStatus.APPROVED:
+            self.assertEqual(
+                Decision.ALLOW,
+                record[1].decision.decision,
+                "Torn snapshot: the approval is APPROVED but its authorization "
+                "record is still the pre-resolution REVIEW. approve_action's "
+                "early return would hand this stale result to a caller.",
+            )
+        else:
+            self.assertEqual(
+                Decision.REVIEW,
+                record[1].decision.decision,
+                "Torn snapshot: the approval is still PENDING but its "
+                "authorization record has already advanced.",
+            )
+
+
+def _approve_round_worker(  # noqa: ANN001
+    barrier, results, database_url: str, request_id: str, reviewer: str
+) -> None:
+    """One replica in a single round of the torn-read reproducer."""
+
+    from intentguard.audit import PostgresAuditLedger
+    from intentguard.budget import PostgresBudgetLedger
+    from intentguard.persistence import PostgresStateRepository
+    from intentguard.policy_engine import PolicyEngine
+
+    engine = PolicyEngine(
+        budget_ledger=PostgresBudgetLedger(database_url),
+        state_repository=PostgresStateRepository(database_url),
+        audit_ledger=PostgresAuditLedger(database_url),
+    )
+    try:
+        barrier.wait()
+        result = engine.approve_action(
+            request_id,
+            reviewer=reviewer,
+            reason="torn read reproducer",
+            now=NOW + timedelta(minutes=1),
+        )
+        results.append(
+            (
+                result.decision.decision.value,
+                result.lease.lease_id if result.lease is not None else None,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        results.append(("error", f"{type(exc).__name__}: {exc}"[:120]))
+    finally:
+        engine.close()
+
+
+@unittest.skipUnless(
+    postgres_available(), "PostgreSQL governance migration is unavailable"
+)
+@unittest.skipUnless(
+    os.getenv("INTENTGUARD_RUN_SLOW_REPRODUCERS") == "1",
+    "Set INTENTGUARD_RUN_SLOW_REPRODUCERS=1 to run the 50-round reproducer",
+)
+class TornReadReproducerTest(unittest.TestCase):
+    """The many-round reproducer that exposed the torn read.
+
+    Roughly one round in twenty-five failed before the isolation fix, so a
+    single round proves nothing. Kept out of the default suite for runtime and
+    run deliberately; ``LoadSnapshotConsistencyTest`` is the deterministic
+    guard that runs every time.
+    """
+
+    WORKERS = 8
+    ROUNDS = int(os.getenv("INTENTGUARD_REPRODUCER_ROUNDS", "50"))
+
+    def _seed_review(self) -> str:
+        from intentguard.budget import PostgresBudgetLedger
+
+        suffix = uuid.uuid4().hex
+        repository = PostgresStateRepository(DATABASE_URL)
+        budget = PostgresBudgetLedger(DATABASE_URL)
+        self.addCleanup(repository.close)
+        self.addCleanup(budget.close)
+        engine = PolicyEngine(state_repository=repository, budget_ledger=budget)
+        agent_id = f"repro-agent-{suffix}"
+        intent_id = f"repro-intent-{suffix}"
+        request_id = f"repro-request-{suffix}"
+        engine.register_agent(
+            AgentProfile(
+                agent_id=agent_id,
+                name="Reproducer Agent",
+                allowed_actions=frozenset({"pay"}),
+                max_action_amount=Decimal("1000"),
+                daily_budget=Decimal("1000000"),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                intent_id=intent_id,
+                customer_id="customer-1",
+                agent_id=agent_id,
+                action="pay",
+                max_amount=Decimal("1000"),
+                currency="INR",
+                expires_at=NOW + timedelta(hours=1),
+            )
+        )
+        outcome = engine.authorize_action(
+            ActionRequest(
+                request_id=request_id,
+                agent_id=agent_id,
+                action="pay",
+                amount=Decimal("100"),
+                currency="INR",
+                intent_id=intent_id,
+                risk_score=100,
+                customer_id="customer-1",
+                submitted_by="agent-user",
+                occurred_at=NOW,
+            ),
+            now=NOW,
+        )
+        self.assertEqual(Decision.REVIEW, outcome.decision.decision)
+        return request_id
+
+    def test_no_round_hands_back_a_lease_less_result(self) -> None:
+        context = mp.get_context("spawn")
+        failures: list[str] = []
+        for round_number in range(1, self.ROUNDS + 1):
+            request_id = self._seed_review()
+            with context.Manager() as manager:
+                results = manager.list()
+                barrier = manager.Barrier(self.WORKERS)
+                processes = [
+                    context.Process(
+                        target=_approve_round_worker,
+                        args=(
+                            barrier,
+                            results,
+                            DATABASE_URL,
+                            request_id,
+                            f"reviewer-{index}",
+                        ),
+                    )
+                    for index in range(self.WORKERS)
+                ]
+                for process in processes:
+                    process.start()
+                for process in processes:
+                    process.join(timeout=120)
+                outcomes = list(results)
+            # A worker that raised reports ("error", message); its second
+            # element is a string, not None, so checking only for a missing
+            # lease would let a crashed replica pass as a clean round.
+            if len(outcomes) != self.WORKERS or any(
+                outcome[0] == "error" or outcome[1] is None for outcome in outcomes
+            ):
+                failures.append(f"round {round_number}: {sorted(set(outcomes))}")
+        self.assertEqual(
+            [],
+            failures,
+            f"{len(failures)}/{self.ROUNDS} rounds were not clean "
+            f"(a lease-less result, a crashed replica, or a missing one):\n"
+            + "\n".join(failures[:5]),
+        )
