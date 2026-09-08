@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -28,6 +29,19 @@ ISSUER = "http://127.0.0.1:9000"
 AUDIENCE = "intentguard-api"
 KEY_ID = "intentguard-local-dev"
 KEY_SIZE_BITS = 2048
+
+# start-demo.sh mints the console's tokens once, at startup, and the browser
+# holds them for the life of the dev server -- nothing refreshes them. At the
+# original 15 minutes that meant the console began 401ing part-way through a
+# session, reported as "Backend offline", which reads as a crashed API rather
+# than an expired credential.
+#
+# Lifetime is not the trust boundary for this issuer: it binds to loopback and
+# mints any role to any caller with no authentication at all. The boundary is
+# that it is unreachable from anywhere else. So a long-lived token here costs
+# nothing real and removes a failure that looks like a product bug. Real
+# deployments use Keycloak, whose lifetimes are its own concern.
+TOKEN_TTL_MINUTES = int(os.getenv("INTENTGUARD_LOCAL_TOKEN_TTL_MINUTES", "720"))
 
 
 def _b64(value: bytes) -> str:
@@ -75,7 +89,7 @@ def issue_token(request: dict[str, Any]) -> str:
         "iss": ISSUER,
         "aud": AUDIENCE,
         "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=15)).timestamp()),
+        "exp": int((now + timedelta(minutes=TOKEN_TTL_MINUTES)).timestamp()),
     }
     for name in ("agent_id", "customer_id"):
         value = request.get(name)
@@ -128,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     print(
         f"Generated an ephemeral {PRIVATE_KEY.key_size}-bit RSA key "
-        "for local development."
+        f"for local development; tokens live {TOKEN_TTL_MINUTES} minutes."
     )
     server = ThreadingHTTPServer(("127.0.0.1", 9000), Handler)
     print(f"Local JWKS: {ISSUER}/.well-known/jwks.json")
