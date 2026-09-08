@@ -10,7 +10,7 @@ Start it with ``python examples/local_jwks_server.py``. Then request a token:
     curl -X POST http://127.0.0.1:9000/token \
       -H "Content-Type: application/json" \
       -d '{"sub":"demo-admin","roles":["admin"],
-           "agent_id":"agt_travel_01","customer_id":"demo-customer"}'
+           "agent_id":"agt_refund_01","customer_id":"demo-customer"}'
 """
 
 from __future__ import annotations
