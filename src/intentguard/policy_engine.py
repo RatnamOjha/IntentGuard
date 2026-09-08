@@ -26,6 +26,7 @@ from .models import (
     BudgetReservation,
     Decision,
     DecisionRecord,
+    FindingContext,
     HumanApproval,
     IntentPassport,
     PolicyFinding,
@@ -487,12 +488,18 @@ class PolicyEngine:
                 condition=request.action in agent.allowed_actions,
                 code="ACTION_NOT_PERMITTED",
                 failure="The agent is not permitted to perform this action.",
+                context=FindingContext(
+                    permitted=frozenset(agent.allowed_actions)
+                ),
             )
             self._check(
                 findings,
                 condition=request.amount <= agent.max_action_amount,
                 code="AGENT_ACTION_LIMIT",
                 failure="The action exceeds the agent's per-action limit.",
+                context=FindingContext(
+                    limit=agent.max_action_amount, actual=request.amount
+                ),
             )
 
         self._check(
@@ -544,6 +551,9 @@ class PolicyEngine:
                 condition=request.amount <= intent.max_amount,
                 code="INTENT_AMOUNT_EXCEEDED",
                 failure="The amount exceeds the customer's authorized maximum.",
+                context=FindingContext(
+                    limit=intent.max_amount, actual=request.amount
+                ),
             )
             self._check_required_attributes(findings, intent, request)
 
@@ -565,6 +575,9 @@ class PolicyEngine:
                 condition=request.amount <= remaining_budget,
                 code="DAILY_BUDGET_EXCEEDED",
                 failure="The action exceeds the agent's remaining daily budget.",
+                context=FindingContext(
+                    limit=remaining_budget, actual=request.amount
+                ),
             )
 
         derived_risk, risk_signals = self._derive_risk(
@@ -1517,6 +1530,13 @@ class PolicyEngine:
                         "The action exceeds the agent's remaining daily budget."
                     ),
                     blocking=True,
+                    # A lost race for headroom: another replica took the
+                    # remainder, so the headroom this request faced really is
+                    # zero. Reporting the pre-race figure would be a number the
+                    # request never had.
+                    context=FindingContext(
+                        limit=Decimal("0"), actual=request.amount
+                    ),
                 ),
             ),
         )
@@ -1736,10 +1756,13 @@ class PolicyEngine:
         condition: bool,
         code: str,
         failure: str,
+        context: FindingContext | None = None,
     ) -> None:
         if not condition:
             findings.append(
-                PolicyFinding(code=code, message=failure, blocking=True)
+                PolicyFinding(
+                    code=code, message=failure, blocking=True, context=context
+                )
             )
 
     @staticmethod
