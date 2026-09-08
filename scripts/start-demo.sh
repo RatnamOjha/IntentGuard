@@ -23,12 +23,14 @@ if ! "$VENV_PYTHON" -c "import intentguard, fastapi, uvicorn" >/dev/null 2>&1; t
   "$VENV_PYTHON" -m pip install -e "$PROJECT_DIR[api,dev]"
 fi
 
-if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vinext" ]]; then
-  (
-    cd "$FRONTEND_DIR"
-    pnpm install --frozen-lockfile
-  )
-fi
+# Probing for one binary is not proof the lockfile is satisfied: a partial or
+# stale node_modules that happens to contain vinext skipped the install and
+# then died on a missing cross-env. pnpm install is fast and a no-op when
+# everything already matches, so just run it.
+(
+  cd "$FRONTEND_DIR"
+  pnpm install --frozen-lockfile
+)
 
 # The one-command demo uses an ephemeral issuer bound only to loopback. Run the
 # API directly with real JWT/JWKS settings in non-demo environments.
