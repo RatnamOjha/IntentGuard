@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
+import typing
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,9 @@ from intentguard.models import (  # noqa: E402
     AgentProfile,
     ApprovalStatus,
     Decision,
+    FindingContext,
     IntentPassport,
+    PolicyFinding,
     ReservationStatus,
 )
 from intentguard.persistence import (  # noqa: E402
@@ -1048,3 +1051,87 @@ class PostgresFleetCompareAndSetTest(unittest.TestCase):
         self.assertEqual(epoch + 1, newer)
         self.assertFalse(self.repository.resume_fleet(expected_epoch=epoch))
         self.assertTrue(self.repository.resume_fleet(expected_epoch=newer))
+
+
+class EncodingRegistryTest(unittest.TestCase):
+    """The codec must be able to read back everything it is able to write."""
+
+    def test_every_encodable_dataclass_can_be_decoded(self) -> None:
+        """A dataclass reachable from stored state but missing from the type
+        registry encodes happily and raises KeyError on the way back, so the
+        failure surfaces on a later read rather than on the write that caused
+        it. This asserts the registry covers the whole reachable graph."""
+
+        from dataclasses import fields, is_dataclass
+
+        from intentguard import models
+        from intentguard.persistence import _DATACLASSES
+
+        def unwrap(annotation: object) -> list[type]:
+            args = typing.get_args(annotation)
+            if not args:
+                return [annotation] if isinstance(annotation, type) else []
+            found: list[type] = []
+            for arg in args:
+                if arg is type(None) or arg is Ellipsis:
+                    continue
+                found.extend(unwrap(arg))
+            return found
+
+        def reachable(cls: type, seen: frozenset[type]) -> frozenset[type]:
+            if cls in seen or not is_dataclass(cls):
+                return seen
+            seen = seen | {cls}
+            hints = typing.get_type_hints(cls)
+            for field in fields(cls):
+                for candidate in unwrap(hints[field.name]):
+                    seen = reachable(candidate, seen)
+            return seen
+
+        roots = (
+            models.AuthorizationResult,
+            models.HumanApproval,
+            models.ActionRequest,
+            models.AgentProfile,
+            models.IntentPassport,
+        )
+        required: frozenset[type] = frozenset()
+        for root in roots:
+            required |= reachable(root, frozenset())
+
+        missing = sorted(
+            cls.__name__ for cls in required if cls.__name__ not in _DATACLASSES
+        )
+        self.assertEqual(
+            [],
+            missing,
+            "Reachable from stored state but absent from persistence "
+            f"_DATACLASSES, so decoding raises KeyError: {missing}",
+        )
+
+    def test_a_finding_context_survives_the_round_trip(self) -> None:
+        from intentguard.persistence import _decode, _encode
+
+        finding = PolicyFinding(
+            code="AGENT_ACTION_LIMIT",
+            message="The action exceeds the agent's per-action limit.",
+            blocking=True,
+            context=FindingContext(limit=Decimal("500"), actual=Decimal("4200")),
+        )
+        restored = _decode(_encode(finding))
+        self.assertEqual(finding, restored)
+        assert restored.context is not None
+        self.assertEqual(Decimal("500"), restored.context.limit)
+
+    def test_a_permitted_set_survives_the_round_trip(self) -> None:
+        from intentguard.persistence import _decode, _encode
+
+        finding = PolicyFinding(
+            code="ACTION_NOT_PERMITTED",
+            message="The agent is not permitted to perform this action.",
+            blocking=True,
+            context=FindingContext(
+                permitted=frozenset({"refund_order", "apply_discount"})
+            ),
+        )
+        self.assertEqual(finding, _decode(_encode(finding)))
