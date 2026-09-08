@@ -242,11 +242,22 @@ class ScriptedPlanner:
     only difference is how the proposal is produced.
     """
 
+    # Order matters: the first match wins, so narrower phrases come first.
+    # Refund phrases are deliberately multi-word: a bare "refund" would also
+    # match "refundable hotel", which is a booking, not a refund.
     ACTION_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("refund_shipping", ("refund shipping", "shipping refund", "postage")),
+        (
+            "refund_order",
+            ("refund order", "issue a refund", "process a refund", "money back"),
+        ),
+        ("issue_goodwill_credit", ("goodwill", "voucher")),
         ("book_flight", ("flight", "fly", "airfare", "ticket")),
         ("book_hotel", ("hotel", "stay", "room", "accommodation")),
-        ("issue_service_credit", ("credit", "goodwill", "compensat")),
+        ("issue_service_credit", ("credit", "compensat")),
         ("reverse_annual_fee", ("annual fee", "fee reversal", "waive")),
+        ("cancel_subscription", ("cancel subscription", "unsubscribe")),
+        ("apply_discount", ("discount", "promo")),
         ("submit_benefit_claim", ("claim", "benefit")),
         ("pay_external_merchant", ("pay ", "merchant", "transfer")),
     )

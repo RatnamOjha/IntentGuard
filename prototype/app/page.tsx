@@ -56,65 +56,65 @@ type Event = {
 };
 
 const scenarios = {
-  booking: {
-    title: "Compliant travel booking",
-    agent: "Atlas",
-    agentId: "agt_travel_01",
-    action: "Book hotel · BOM",
-    actionCode: "book_hotel",
-    amount: "₹12,400",
-    amountValue: "12400",
-    intentId: "intent_travel_booking",
-    riskScore: 22,
-    attributes: { city: "BOM", refundable: true },
+  routine: {
+    title: "Routine refund, inside policy",
+    agent: "Ada",
+    agentId: "agt_refund_01",
+    action: "Refund order \u00b7 damaged item",
+    actionCode: "refund_order",
+    amount: "\u20b9380",
+    amountValue: "380",
+    intentId: "intent_refund_routine",
+    riskScore: 8,
+    attributes: { ticket: "SUP-4417", reason: "damaged_on_arrival" },
   },
-  cap: {
-    title: "Dynamic spend cap breach",
-    agent: "Nova",
-    agentId: "agt_service_02",
-    action: "Issue service credit",
-    amount: "₹18,500",
-    amountValue: "18500",
-    actionCode: "issue_service_credit",
-    intentId: "intent_service_credit",
-    riskScore: 30,
-    attributes: {},
+  overLimit: {
+    title: "Refund above the agent's per-ticket limit",
+    agent: "Ada",
+    agentId: "agt_refund_01",
+    action: "Refund order \u00b7 \u20b94,200",
+    actionCode: "refund_order",
+    amount: "\u20b94,200",
+    amountValue: "4200",
+    intentId: "intent_refund_routine",
+    riskScore: 15,
+    attributes: { ticket: "SUP-4418", reason: "customer_escalation" },
   },
-  permission: {
-    title: "Out-of-scope merchant payment",
-    agent: "Orbit",
-    agentId: "agt_benefits_03",
-    action: "Pay external merchant",
-    amount: "₹31,200",
-    amountValue: "31200",
-    actionCode: "pay_external_merchant",
-    intentId: "intent_external_payment",
-    riskScore: 35,
-    attributes: {},
+  notPermitted: {
+    title: "Billing agent attempts a refund",
+    agent: "Cy",
+    agentId: "agt_billing_03",
+    action: "Refund order \u00b7 \u20b9750",
+    actionCode: "refund_order",
+    amount: "\u20b9750",
+    amountValue: "750",
+    intentId: "intent_billing_change",
+    riskScore: 20,
+    attributes: { ticket: "SUP-4419", reason: "billing_dispute" },
   },
-  approval: {
-    title: "High-risk fee reversal",
-    agent: "Nova",
-    agentId: "agt_service_02",
-    action: "Reverse annual fee",
-    amount: "₹4,500",
-    amountValue: "4500",
-    actionCode: "reverse_annual_fee",
-    intentId: "intent_fee_reversal",
-    riskScore: 85,
-    attributes: {},
+  review: {
+    title: "Large goodwill credit needs a human",
+    agent: "Bo",
+    agentId: "agt_refund_02",
+    action: "Goodwill credit \u00b7 \u20b94,800",
+    actionCode: "issue_goodwill_credit",
+    amount: "\u20b94,800",
+    amountValue: "4800",
+    intentId: "intent_goodwill_credit",
+    riskScore: 88,
+    attributes: { ticket: "SUP-4420", reason: "service_outage" },
   },
   stale: {
-    title: "Stale lease after emergency stop",
-    agent: "Atlas",
-    agentId: "agt_travel_01",
-    action: "Book hotel, then stop fleet",
-    amount: "₹1,000",
-    amountValue: "1000",
-    actionCode: "book_hotel",
-    intentId: "intent_travel_booking",
-    riskScore: 18,
-    attributes: { city: "BOM", refundable: true },
+    title: "Refund attempted after an emergency stop",
+    agent: "Bo",
+    agentId: "agt_refund_02",
+    action: "Refund order, then stop the fleet",
+    actionCode: "refund_order",
+    amount: "\u20b91,200",
+    amountValue: "1200",
+    intentId: "intent_refund_escalated",
+    riskScore: 10,
+    attributes: { ticket: "SUP-4421", reason: "duplicate_charge" },
   },
 };
 
@@ -140,14 +140,11 @@ type PolicyDraft = {
 type TraceState = "pass" | "fail" | "review" | "pending";
 
 const actionCatalog = [
-  "book_flight",
-  "book_hotel",
-  "issue_service_credit",
-  "replace_card",
-  "reverse_annual_fee",
-  "activate_benefit",
-  "submit_benefit_claim",
-  "pay_external_merchant",
+  "refund_order",
+  "issue_goodwill_credit",
+  "refund_shipping",
+  "cancel_subscription",
+  "apply_discount",
 ];
 
 const traceStages = [
@@ -160,9 +157,9 @@ const traceStages = [
 ] as const;
 
 const agentPresentation: Record<string, { role: string; initials: string }> = {
-  agt_travel_01: { role: "Travel concierge", initials: "AT" },
-  agt_service_02: { role: "Service recovery", initials: "NV" },
-  agt_benefits_03: { role: "Benefits assistant", initials: "OR" },
+  agt_refund_01: { role: "Tier-one refunds", initials: "AD" },
+  agt_refund_02: { role: "Refund escalations", initials: "BO" },
+  agt_billing_03: { role: "Billing adjustments", initials: "CY" },
 };
 
 function formatCurrency(amount: unknown, currency = "INR") {
@@ -359,7 +356,7 @@ export default function Home() {
     expected_head_hash: "",
     first_invalid_link: null,
   });
-  const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("booking");
+  const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("overLimit");
   const [lastResult, setLastResult] = useState<Result | null>(null);
   const [fleetStopped, setFleetStopped] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
@@ -373,8 +370,8 @@ export default function Home() {
   const [apiRoundTrip, setApiRoundTrip] =
     useState<ApiRoundTripBenchmark | null>(null);
   const [selectedPolicyAgentId, setSelectedPolicyAgentId] =
-    useState("agt_travel_01");
-  const selectedPolicyAgentRef = useRef("agt_travel_01");
+    useState("agt_refund_01");
+  const selectedPolicyAgentRef = useRef("agt_refund_01");
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>({
     allowedActions: [],
     maxActionAmount: "",
@@ -1272,7 +1269,7 @@ export default function Home() {
 
             <div className="budget-editor">
               <label className="field-label" htmlFor="action-limit">
-                Maximum per action (INR)
+                Maximum per refund (INR)
               </label>
               <input
                 id="action-limit"
@@ -1287,7 +1284,7 @@ export default function Home() {
                 value={policyDraft.maxActionAmount}
               />
               <label className="field-label" htmlFor="daily-budget">
-                Daily budget (INR)
+                Daily refund budget (INR)
               </label>
               <input
                 id="daily-budget"

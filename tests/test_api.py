@@ -240,7 +240,7 @@ class ApiTest(unittest.TestCase):
             create_app(PolicyEngine(), authenticator=test_authenticator())
         )
         demo_client.headers.update(
-            admin_headers(customer_id="demo-customer", agent_id="agt_travel_01")
+            admin_headers(customer_id="demo-customer", agent_id="agt_refund_01")
         )
         first = demo_client.post("/v1/demo/bootstrap")
         second = demo_client.post("/v1/demo/bootstrap")
@@ -253,7 +253,7 @@ class ApiTest(unittest.TestCase):
         )
         agents = demo_client.get("/v1/agents").json()
         self.assertEqual(
-            {"Atlas", "Nova", "Orbit"},
+            {"Ada", "Bo", "Cy"},
             {agent["name"] for agent in agents},
         )
 
@@ -392,7 +392,7 @@ class AgentEndpointTest(unittest.TestCase):
         app.state.agent = GovernedAgent(self.engine, planner=ScriptedPlanner())
         self.client = TestClient(app)
         self.client.headers.update(
-            admin_headers(customer_id="demo-customer", agent_id="agt_travel_01")
+            admin_headers(customer_id="demo-customer", agent_id="agt_refund_01")
         )
         self.client.post("/v1/demo/bootstrap")
 
@@ -402,14 +402,14 @@ class AgentEndpointTest(unittest.TestCase):
             json={
                 "message": message,
                 "customer_id": customer_id,
-                "agent_id": "agt_travel_01",
+                "agent_id": "agt_refund_01",
             },
         )
         self.assertEqual(200, response.status_code)
         return response.json()
 
     def test_a_compliant_request_is_allowed(self) -> None:
-        body = self._say("book a refundable hotel in BOM for 12000")
+        body = self._say("issue a refund for 380")
 
         self.assertEqual("allow", body["decision"])
         self.assertEqual("scripted", body["planner"])
@@ -419,7 +419,7 @@ class AgentEndpointTest(unittest.TestCase):
         self.assertNotIn("refundable hotel", str(body["trace"]))
 
     def test_an_out_of_policy_request_is_refused_with_reasons(self) -> None:
-        body = self._say("book a non-refundable hotel for 9000")
+        body = self._say("issue a refund for 4200")
 
         self.assertEqual("deny", body["decision"])
         self.assertTrue(body["blocked_reasons"])
@@ -428,13 +428,13 @@ class AgentEndpointTest(unittest.TestCase):
     def test_intents_are_scoped_to_the_requesting_customer(self) -> None:
         response = self.client.get(
             "/v1/agent/intents",
-            params={"customer_id": "someone-else", "agent_id": "agt_travel_01"},
+            params={"customer_id": "someone-else", "agent_id": "agt_refund_01"},
         )
 
         self.assertEqual(403, response.status_code)
 
     def test_refusals_reach_the_audit_trail(self) -> None:
-        self._say("book a non-refundable hotel for 9000")
+        self._say("issue a refund for 4200")
 
         status = self.client.get("/v1/audit/status").json()
         self.assertTrue(status["verified"])
