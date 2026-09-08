@@ -184,6 +184,18 @@ function tokenForAgent(agentId: string) {
   return AGENT_TOKENS[agentId] ?? AGENT_ACCESS_TOKEN;
 }
 
+/** An API error that keeps its HTTP status, so 401 can be told from a
+ *  network failure. Both used to surface as "Backend offline". */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function apiRequest<T>(
   path: string,
   init?: RequestInit,
@@ -202,7 +214,10 @@ async function apiRequest<T>(
     const body = (await response.json().catch(() => null)) as
       | { detail?: string }
       | null;
-    throw new Error(body?.detail ?? `IntentGuard API returned ${response.status}.`);
+    throw new ApiError(
+      body?.detail ?? `IntentGuard API returned ${response.status}.`,
+      response.status,
+    );
   }
 
   if (response.status === 204) {

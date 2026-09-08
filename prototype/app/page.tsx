@@ -9,6 +9,7 @@ import {
   type ApiAuditEvent,
   type ApiAuditStatus,
   type ApiAuthorization,
+  ApiError,
   authorizeAction,
   bootstrapDemo,
   commitAuthorization,
@@ -121,7 +122,9 @@ export default function Console() {
   const [verdict, setVerdict] = useState<VerdictData | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
-  const [link, setLink] = useState<"connecting" | "live" | "offline">("connecting");
+  const [link, setLink] = useState<
+    "connecting" | "live" | "offline" | "expired"
+  >("connecting");
 
   const pending = approvals.filter((approval) => approval.status === "pending");
 
@@ -153,9 +156,17 @@ export default function Console() {
         await bootstrapDemo();
         await refresh();
       } catch (error) {
-        setLink("offline");
+        // A 401 means the demo's startup tokens aged out, not that the API
+        // died. Reporting both as "offline" sent us looking at the wrong
+        // process more than once.
+        const expired = error instanceof ApiError && error.status === 401;
+        setLink(expired ? "expired" : "offline");
         setNotice(
-          error instanceof Error ? `Backend unavailable: ${error.message}` : "Backend unavailable.",
+          expired
+            ? "The demo's access tokens have expired. Restart ./scripts/start-demo.sh to mint fresh ones."
+            : error instanceof Error
+              ? `Backend unavailable: ${error.message}`
+              : "Backend unavailable.",
         );
       }
     })();
@@ -339,11 +350,13 @@ export default function Console() {
             <span className={styles.statusDot} aria-hidden="true" />
             {link === "offline"
               ? "Backend offline"
-              : link === "connecting"
-                ? "Connecting"
-                : fleetStopped
-                  ? "Fleet stopped"
-                  : "Fleet running"}
+              : link === "expired"
+                ? "Tokens expired"
+                : link === "connecting"
+                  ? "Connecting"
+                  : fleetStopped
+                    ? "Fleet stopped"
+                    : "Fleet running"}
           </span>
           <button
             className={fleetStopped ? styles.resume : styles.stop}
