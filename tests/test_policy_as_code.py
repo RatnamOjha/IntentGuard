@@ -26,6 +26,28 @@ from tests.jwt_test_support import AUDIENCE, ISSUER, JWKS, bearer
 
 
 OPA = find_opa_executable()
+
+# CI installs OPA, so a skip there means the binary was installed and never
+# found -- which is how a broken lookup once let CI report green while every
+# test of the policy engine was skipped. With this set, not finding OPA is a
+# failure rather than a quiet skip. Contributors without OPA still skip.
+REQUIRE_OPA = os.getenv("INTENTGUARD_REQUIRE_OPA_TESTS") == "1"
+
+
+class OpaAvailabilityTest(unittest.TestCase):
+    """Guards the guard: a skipped Rego suite must not look like a pass."""
+
+    def test_opa_is_discoverable_where_it_is_required(self) -> None:
+        if not REQUIRE_OPA:
+            self.skipTest(
+                "Set INTENTGUARD_REQUIRE_OPA_TESTS=1 to require a discoverable OPA"
+            )
+        self.assertIsNotNone(
+            OPA,
+            "INTENTGUARD_REQUIRE_OPA_TESTS=1 but find_opa_executable() returned "
+            "None, so every Rego test below skipped. An installed-but-unfound "
+            "policy engine is the failure this flag exists to make visible.",
+        )
 NOW = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
 
 

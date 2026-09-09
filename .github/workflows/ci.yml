@@ -33,6 +33,10 @@ jobs:
       - name: Unit tests
         env:
           INTENTGUARD_LOG_LEVEL: WARNING
+          # This job installs OPA above. Without this flag a lookup that fails
+          # to find it turns the whole Rego suite into skips and the job still
+          # reports green, which is exactly what happened.
+          INTENTGUARD_REQUIRE_OPA_TESTS: "1"
         run: uv run python -m unittest discover -s tests -q
       - name: Adversarial tests
         env:
