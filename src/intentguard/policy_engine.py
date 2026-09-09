@@ -651,6 +651,11 @@ class PolicyEngine:
                 "decision": decision.value,
                 "finding_codes": [item.code for item in findings],
                 "policy_version": self.policy_version,
+                # Named on every decision, not only the Rego ones. The two
+                # evaluators are not equivalent, so "which one decided this"
+                # is part of the record -- and the first field an investigator
+                # would want if they ever disagreed in production.
+                "policy_engine": "builtin",
                 "declared_risk": risk.declared,
                 "derived_risk": risk.derived,
                 "effective_risk": risk.effective,
