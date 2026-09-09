@@ -359,20 +359,26 @@ class ScriptedPlanner:
 class ChatCompletionsPlanner:
     """Plans actions with any OpenAI-compatible chat-completions provider."""
 
-    PROMPT_VERSION = "financial-proposal-v2"
+    PROMPT_VERSION = "financial-proposal-v3"
     RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
     SYSTEM_PROMPT = (
         "You are a financial concierge agent operating behind IntentGuard, a "
-        "runtime governance layer. Turn the customer's request into exactly one "
-        "call to propose_action when they are asking you to spend money or "
-        "transact. Reply in plain text instead when they are only asking a "
-        "question.\n\n"
+        "runtime governance layer.\n\n"
+        "If the message involves moving money -- a refund, a credit, a "
+        "payment, a booking -- make exactly one call to propose_action. That "
+        "includes requests phrased as wishes, complaints or demands: "
+        "\"I want a refund of 500\" is a request to act, not a question. "
+        "Reply in plain text only when no money is involved at all.\n\n"
+        "Propose even when you expect the answer to be no. Proposing is not "
+        "performing, and you are not the one who decides: IntentGuard "
+        "evaluates every proposal and refuses the ones that break policy. A "
+        "refusal is a normal, useful outcome. Declining to propose is worse "
+        "than proposing something that gets refused, because it hides the "
+        "request from the control that exists to judge it.\n\n"
         "You may only cite an intent_id from the list you are given; those are "
         "the authorizations this customer has actually granted. Never invent "
-        "one. You do not decide whether an action is permitted: IntentGuard "
-        "evaluates every proposal and may refuse it. Do not claim an action "
-        "succeeded unless you are told that it did."
+        "one. Do not claim an action succeeded unless you are told that it did."
     )
 
     def __init__(
@@ -388,6 +394,7 @@ class ChatCompletionsPlanner:
         retry_backoff: float = 0.05,
         sleeper: Any = time.sleep,
         max_tool_calls: int = 1,
+        temperature: float = 0.0,
     ) -> None:
         self.api_key = api_key
         self.provider = provider or provider_for_key(api_key)
@@ -401,6 +408,11 @@ class ChatCompletionsPlanner:
         self.retry_backoff = retry_backoff
         self._sleeper = sleeper
         self.max_tool_calls = max_tool_calls
+        # Default 1.0 made the same sentence propose on two runs in three and
+        # decline on the third -- the demo's whole point, lost to sampling.
+        # tool_choice stays "auto" so a non-financial message still gets a
+        # plain answer; this only stops the model dithering on one that is.
+        self.temperature = temperature
         self._last_trace: PlannerTrace | None = None
         self._trace_id: str | None = None
 
@@ -434,7 +446,18 @@ class ChatCompletionsPlanner:
                             # Constrains the model to this customer's intents.
                             "enum": [intent.intent_id for intent in intents],
                         },
-                        "action": {"type": "string"},
+                        # Constrained like intent_id, and for the same reason:
+                        # the customer's intents define which actions they have
+                        # authorised, so the model must not invent a name. It
+                        # otherwise reaches for plausible-looking ones ("refund"
+                        # for "refund_order"), which the engine correctly
+                        # refuses as ACTION_NOT_PERMITTED -- a true refusal, but
+                        # for the model's spelling rather than the real breach.
+                        "action": {
+                            "type": "string",
+                            "description": "Must be one of the authorized actions.",
+                            "enum": sorted({intent.action for intent in intents}),
+                        },
                         "amount": {
                             "type": "string",
                             "description": "Decimal amount, digits and at most one point.",
@@ -645,6 +668,7 @@ class ChatCompletionsPlanner:
                     ],
                     "tools": [{"type": "function", **function}],
                     "tool_choice": "auto",
+                    "temperature": self.temperature,
                     "parallel_tool_calls": False,
                     "max_output_tokens": 500,
                     "store": False,
@@ -658,6 +682,7 @@ class ChatCompletionsPlanner:
                 "messages": self._messages(message, intents, history),
                 "tools": [schema],
                 "tool_choice": "auto",
+                "temperature": self.temperature,
                 "parallel_tool_calls": False,
             },
             "/chat/completions",
@@ -822,6 +847,7 @@ def build_planner(
         timeout=float(os.getenv("INTENTGUARD_LLM_TIMEOUT_SECONDS", "30")),
         max_retries=int(os.getenv("INTENTGUARD_LLM_MAX_RETRIES", "2")),
         max_tool_calls=int(os.getenv("INTENTGUARD_LLM_MAX_TOOL_CALLS", "1")),
+        temperature=float(os.getenv("INTENTGUARD_LLM_TEMPERATURE", "0")),
     )
 
 
