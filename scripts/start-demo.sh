@@ -104,6 +104,11 @@ export NEXT_PUBLIC_INTENTGUARD_OPERATOR_ACCESS_TOKEN="$(
 export NEXT_PUBLIC_INTENTGUARD_REVIEWER_ACCESS_TOKEN="$(
   issue_local_token local-demo-reviewer reviewer
 )"
+# The chat panel talks to /v1/agent/message, which is guarded by
+# customer_principal and takes customer_id from the verified token.
+export NEXT_PUBLIC_INTENTGUARD_CUSTOMER_ACCESS_TOKEN="$(
+  issue_local_token demo-customer customer agt_refund_01
+)"
 export INTENTGUARD_CONNECTOR_ACCESS_TOKEN="$(
   issue_local_token local-booking-connector connector
 )"

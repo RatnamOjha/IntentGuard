@@ -20,11 +20,13 @@ import {
   getFleetStatus,
   resetDemo,
   resolveApproval,
+  sendAgentMessage,
   setAgentRevocation,
   setFleetStop,
   updateAgentPolicy,
 } from "@/lib/intentguard-api";
 
+import { AgentChat, type ChatLine } from "./components/AgentChat";
 import { AgentRoster } from "./components/AgentRoster";
 import { DecisionFeed, type FeedRow } from "./components/DecisionFeed";
 import { Money } from "./components/Money";
@@ -125,6 +127,9 @@ export default function Console() {
   const [link, setLink] = useState<
     "connecting" | "live" | "offline" | "expired"
   >("connecting");
+  const [chat, setChat] = useState<ChatLine[]>([]);
+  const [planner, setPlanner] = useState<string | null>(null);
+  const [talking, setTalking] = useState(false);
 
   const pending = approvals.filter((approval) => approval.status === "pending");
 
@@ -252,6 +257,61 @@ export default function Console() {
         }
       }
       setBusy(false);
+    }
+  }
+
+  /** One conversational turn. The agent proposes; the engine decides, and its
+   *  decision lands in the same verdict card the scenarios use. */
+  async function talk(message: string) {
+    const stamp = Date.now();
+    setChat((current) => [
+      ...current,
+      { id: `c${stamp}`, from: "customer", text: message },
+    ]);
+    setTalking(true);
+    const startedAt = performance.now();
+    try {
+      const turn = await sendAgentMessage(scenarios[scenarioKey].agentId, message);
+      setPlanner(turn.planner);
+      setChat((current) => [
+        ...current,
+        {
+          id: `a${stamp}`,
+          from: "agent",
+          text: turn.reply,
+          decision: turn.decision,
+        },
+      ]);
+      // Only a proposal that reached the engine has a decision to show.
+      if (turn.authorization && turn.proposal) {
+        setVerdict({
+          outcome: outcomeOf(turn.authorization.decision.decision),
+          agentName: scenarios[scenarioKey].agent,
+          action: turn.proposal.action,
+          amount: turn.proposal.amount,
+          findings: turn.authorization.decision.findings,
+          latencyMs: performance.now() - startedAt,
+          remainingBudget: Number(
+            turn.authorization.decision.remaining_daily_budget,
+          ),
+          leaseId: turn.authorization.lease?.lease_id ?? null,
+        });
+      }
+      await refresh();
+    } catch (error) {
+      setChat((current) => [
+        ...current,
+        {
+          id: `e${stamp}`,
+          from: "agent",
+          text:
+            error instanceof Error
+              ? error.message
+              : "The agent could not be reached.",
+        },
+      ]);
+    } finally {
+      setTalking(false);
     }
   }
 
@@ -401,8 +461,16 @@ export default function Console() {
 
         <section className={styles.console}>
           <div className={styles.left}>
-            <h2 className={styles.stepLabel}>
-              <span className={styles.step}>1</span> Choose a request
+            <AgentChat
+              busy={talking}
+              disabled={busy || link !== "live"}
+              lines={chat}
+              onSend={(message) => void talk(message)}
+              planner={planner}
+            />
+
+            <h2 className={`${styles.stepLabel} ${styles.orLabel}`}>
+              <span className={styles.step}>or</span> run a prepared request
             </h2>
             <ScenarioList
               disabled={busy || link !== "live"}
@@ -421,14 +489,22 @@ export default function Console() {
               {busy ? "Evaluating…" : "Run it through IntentGuard"}
               <span aria-hidden="true"> →</span>
             </button>
-            <button className={styles.reset} disabled={busy} onClick={() => void reset()} type="button">
+            <button
+              className={styles.reset}
+              disabled={busy || talking}
+              onClick={() => {
+                setChat([]);
+                void reset();
+              }}
+              type="button"
+            >
               Reset demo
             </button>
           </div>
 
           <div className={styles.right}>
             <h2 className={styles.stepLabel}>
-              <span className={styles.step}>2</span> Read the decision
+              <span className={styles.step}>→</span> The decision
             </h2>
             <Verdict
               busy={busy}
