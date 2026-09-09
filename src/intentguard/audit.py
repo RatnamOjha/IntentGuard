@@ -12,8 +12,31 @@ from enum import Enum
 from typing import Any, Protocol
 
 
+def _utc(value: datetime) -> datetime:
+    """Render an instant identically no matter which session reads it.
+
+    ``occurred_at`` is stored as TIMESTAMPTZ. psycopg hands it back in the
+    connection's timezone, so one instant stringifies as ``...+05:30`` on an
+    IST host and ``...+00:00`` on a UTC one. The chain hashes that string, so
+    a ledger written anywhere failed to verify anywhere else -- reported as a
+    broken chain, which is exactly the alarm this structure exists to raise.
+    Normalising first makes the digest a property of the instant rather than
+    of whoever is reading it.
+
+    Naive values are returned untouched. They carry no offset, so ``str`` is
+    already reader-independent, and ``astimezone`` would invent one from the
+    host clock. Chains written on a UTC host keep verifying byte for byte:
+    ``str`` of an already-UTC datetime is unchanged by the conversion, so no
+    existing digest moves and there is nothing to re-chain.
+    """
+
+    return value if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def _json_default(value: Any) -> str:
-    if isinstance(value, (datetime, Decimal, Enum)):
+    if isinstance(value, datetime):
+        return str(_utc(value))
+    if isinstance(value, (Decimal, Enum)):
         return str(value)
     raise TypeError(f"Unsupported audit value: {type(value)!r}")
 
@@ -184,7 +207,9 @@ class AuditLedger:
 def _jsonable(value: Any) -> Any:
     """Convert audit values to the exact JSON scalars used by `_canonical`."""
 
-    if isinstance(value, (datetime, Decimal, Enum)):
+    if isinstance(value, datetime):
+        return str(_utc(value))
+    if isinstance(value, (Decimal, Enum)):
         return str(value)
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
