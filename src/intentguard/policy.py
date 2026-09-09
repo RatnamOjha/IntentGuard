@@ -245,7 +245,22 @@ def initial_policy(source: str | None = None) -> PolicyVersion:
 
 
 def find_opa_executable() -> str | None:
+    """Locate the OPA binary, including the one ``install-opa.sh`` writes.
+
+    The vendored candidate used to be listed only as ``opa.exe``, while the
+    installer writes ``.tools/opa``. Nothing ever found it: CI installed a
+    policy engine, skipped every test of it, and reported green, while the
+    gateway silently fell back to the built-in evaluator. Both names are
+    listed now -- POSIX first, since that is what the installer produces.
+    """
+
     import shutil
-    configured = os.getenv("INTENTGUARD_OPA_EXECUTABLE")
-    candidates = [configured, shutil.which("opa"), str(Path(__file__).parents[2] / ".tools" / "opa.exe")]
+
+    tools = Path(__file__).parents[2] / ".tools"
+    candidates = [
+        os.getenv("INTENTGUARD_OPA_EXECUTABLE"),
+        shutil.which("opa"),
+        str(tools / "opa"),
+        str(tools / "opa.exe"),
+    ]
     return next((item for item in candidates if item and Path(item).is_file()), None)
