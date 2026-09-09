@@ -34,9 +34,12 @@ test("server-renders the IntentGuard console", async () => {
   assert.match(html, /Your support agent can issue/);
   assert.match(html, /It cannot issue the wrong ones/);
 
-  // Two numbered steps, so a first-time viewer knows where to start.
-  assert.match(html, /Choose a request/i);
-  assert.match(html, /Read the decision/i);
+  // The agent surface leads, because a typed request is what makes the
+  // enforcement legible; the prepared scenarios are the fallback beneath it.
+  assert.match(html, /Talk to the agent/i);
+  assert.match(html, /never decides/i);
+  assert.match(html, /run a prepared request/i);
+  assert.match(html, /The decision/i);
 
   // Every scenario states its own expected outcome up front.
   // React escapes the apostrophe, so match around it.
