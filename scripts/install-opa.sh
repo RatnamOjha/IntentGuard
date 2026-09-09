@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION=1.19.1
-EXPECTED_SHA256=fb356176d8063f92920ba9d2650b2b07d0f67e4f6a10b389e2907fc3902c5a9a
+VERSION=1.20.2
+EXPECTED_SHA256=ed3127751a4c786eb407d26a952c92f45fdcc4b97e0af25cd5d721a414fab244
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL_DIR="$PROJECT_DIR/.tools"
 TARGET="$TOOL_DIR/opa"
