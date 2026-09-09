@@ -440,6 +440,10 @@ class ChatCompletionsPlanner:
                             "description": "Decimal amount, digits and at most one point.",
                         },
                         "currency": {"type": "string"},
+                        # Deliberately open: attribute keys vary per intent
+                        # (refundable, ticket, reason...), and unconstrained
+                        # ones feed the gateway's own risk derivation. Closing
+                        # this to a fixed set would change what risk sees.
                         "attributes": {
                             "type": "object",
                             "description": "Contextual constraints such as refundability.",
@@ -470,7 +474,22 @@ class ChatCompletionsPlanner:
                     ],
                     "additionalProperties": False,
                 },
-                "strict": True,
+                # Not strict. Providers implementing OpenAI strict mode require
+                # additionalProperties:false on *every* nested object, which is
+                # incompatible with the open attributes map above -- Groq now
+                # rejects the tool outright:
+                #
+                #   400 invalid JSON schema for tool propose_action,
+                #   /properties/attributes: `additionalProperties:false` must
+                #   be set on every object
+                #
+                # Nothing is lost that we were relying on. Strict was defence in
+                # depth; the boundary is _to_proposal, which drops any intent_id
+                # this customer does not hold and revalidates the whole payload
+                # through ProposalPayload (extra="forbid"). The model's output
+                # is untrusted either way -- see Decisions "propose, never
+                # decide".
+                "strict": False,
             },
         }
 
