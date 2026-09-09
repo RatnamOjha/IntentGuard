@@ -144,6 +144,24 @@ export type ApiPolicyVersion = {
   based_on: string | null;
 };
 
+/** One turn of the governed conversation. The agent proposes; it never decides. */
+export type ApiAgentTurn = {
+  reply: string;
+  /** Which planner produced the proposal: "scripted", or "<provider>:<model>". */
+  planner: string;
+  decision: ApiDecision | null;
+  blocked_reasons: string[];
+  proposal: {
+    intent_id: string;
+    action: string;
+    amount: string;
+    currency: string;
+    rationale: string;
+    risk_score: number;
+  } | null;
+  authorization: ApiAuthorization | null;
+};
+
 export type ActionPayload = {
   request_id: string;
   agent_id: string;
@@ -155,6 +173,10 @@ export type ActionPayload = {
   attributes: Record<string, unknown>;
 };
 
+/** The seeded demo customer. The gateway takes the real one from the token
+ *  and rejects a mismatch, so this is a convenience, not an identity claim. */
+export const DEMO_CUSTOMER_ID = "demo-customer";
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_INTENTGUARD_API_URL ?? "http://127.0.0.1:8000";
 const ACCESS_TOKEN = process.env.NEXT_PUBLIC_INTENTGUARD_ACCESS_TOKEN;
@@ -164,6 +186,8 @@ const OPERATOR_ACCESS_TOKEN =
   process.env.NEXT_PUBLIC_INTENTGUARD_OPERATOR_ACCESS_TOKEN ?? ACCESS_TOKEN;
 const REVIEWER_ACCESS_TOKEN =
   process.env.NEXT_PUBLIC_INTENTGUARD_REVIEWER_ACCESS_TOKEN ?? ACCESS_TOKEN;
+const CUSTOMER_ACCESS_TOKEN =
+  process.env.NEXT_PUBLIC_INTENTGUARD_CUSTOMER_ACCESS_TOKEN ?? ACCESS_TOKEN;
 
 /**
  * A bearer token names the single agent it may act for, so driving several
@@ -392,6 +416,22 @@ export function resolveApproval(requestId: string, approved: boolean) {
       }),
     },
     REVIEWER_ACCESS_TOKEN,
+  );
+}
+
+/** Send one customer message to the governed agent. */
+export function sendAgentMessage(agentId: string, message: string) {
+  return apiRequest<ApiAgentTurn>(
+    "/v1/agent/message",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        customer_id: DEMO_CUSTOMER_ID,
+        agent_id: agentId,
+        message,
+      }),
+    },
+    CUSTOMER_ACCESS_TOKEN,
   );
 }
 

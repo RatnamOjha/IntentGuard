@@ -173,6 +173,7 @@
   color: var(--ink-faint);
   margin-bottom: 13px;
 }
+.orLabel { margin-top: 22px; }
 .step {
   width: 19px;
   height: 19px;
