@@ -26,6 +26,7 @@ from .models import (
     BudgetReservation,
     Decision,
     DecisionRecord,
+    FindingContext,
     HumanApproval,
     IntentPassport,
     PolicyFinding,
@@ -251,8 +252,9 @@ class PolicyEngine:
             )
             self._agents[agent_id] = updated
             self._sync_agent_unlocked(updated)
-            self._policy_revision += 1
-            self.policy_version = f"2026.07.r{self._policy_revision}"
+            self._policy_revision, self.policy_version = (
+                self._next_policy_revision_unlocked()
+            )
             self.audit_ledger.append(
                 "policy.updated",
                 {
@@ -360,13 +362,11 @@ class PolicyEngine:
             self._refresh_state_unlocked()
             self._revoked_agents.add(agent_id)
             self._revocation_epochs[agent_id] = (
-                self._revocation_epochs.get(agent_id, 0) + 1
+                self._next_revocation_epoch_unlocked(agent_id)
             )
             self.audit_ledger.append("agent.revoked", {"agent_id": agent_id})
             for reservation in self.budget_ledger.held(agent_id):
-                self._release_reservation_unlocked(
-                    reservation, reason="agent_revoked"
-                )
+                self._release_if_held_unlocked(reservation, reason="agent_revoked")
             self._persist_state_unlocked()
 
     def restore_agent(self, agent_id: str) -> None:
@@ -385,23 +385,48 @@ class PolicyEngine:
             self._persist_state_unlocked()
 
     def stop_fleet(self, *, reason: str) -> None:
+        """Halt the fleet. The durable stop happens before anything records it.
+
+        Order matters here and is the whole point of this method's shape. The
+        stop is made durable first, and only then written to the ledger, so an
+        audit trail that says the fleet stopped cannot outlive a stop that
+        never landed. Everything after the durable write is best-effort
+        cleanup: it may fail, and the fleet stays stopped either way, which is
+        the safe direction for a kill switch.
+        """
+
         with self._lock:
             self._refresh_state_unlocked()
+            # Durable first. If this raises, nothing has been claimed and
+            # nothing has been recorded.
+            epoch = self._next_fleet_epoch_unlocked()
             self._fleet_stopped = True
-            self._fleet_epoch += 1
+            self._fleet_epoch = epoch
             self.audit_ledger.append(
                 "fleet.stopped",
-                {"reason": reason, "fleet_epoch": self._fleet_epoch},
+                {"reason": reason, "fleet_epoch": epoch},
             )
             for reservation in self.budget_ledger.held():
-                self._release_reservation_unlocked(
-                    reservation, reason="fleet_stopped"
-                )
+                self._release_if_held_unlocked(reservation, reason="fleet_stopped")
             self._persist_state_unlocked()
 
     def resume_fleet(self) -> None:
+        """Lift a fleet stop, unless a newer stop has landed since we looked.
+
+        Resuming is a compare-and-set against the fleet epoch, which is the
+        version number of the stopped state. If another replica stopped the
+        fleet between this call reading state and writing it, the resume is
+        refused rather than silently cancelling that stop.
+        """
+
         with self._lock:
             self._refresh_state_unlocked()
+            if not self._resume_fleet_unlocked(self._fleet_epoch):
+                raise ValueError(
+                    "The fleet was stopped again while this resume was in "
+                    "flight. The newer stop stands; re-read the fleet status "
+                    "and resume again if that is still what you want."
+                )
             self._fleet_stopped = False
             self.audit_ledger.append(
                 "fleet.resumed", {"fleet_epoch": self._fleet_epoch}
@@ -463,12 +488,18 @@ class PolicyEngine:
                 condition=request.action in agent.allowed_actions,
                 code="ACTION_NOT_PERMITTED",
                 failure="The agent is not permitted to perform this action.",
+                context=FindingContext(
+                    permitted=frozenset(agent.allowed_actions)
+                ),
             )
             self._check(
                 findings,
                 condition=request.amount <= agent.max_action_amount,
                 code="AGENT_ACTION_LIMIT",
                 failure="The action exceeds the agent's per-action limit.",
+                context=FindingContext(
+                    limit=agent.max_action_amount, actual=request.amount
+                ),
             )
 
         self._check(
@@ -520,6 +551,9 @@ class PolicyEngine:
                 condition=request.amount <= intent.max_amount,
                 code="INTENT_AMOUNT_EXCEEDED",
                 failure="The amount exceeds the customer's authorized maximum.",
+                context=FindingContext(
+                    limit=intent.max_amount, actual=request.amount
+                ),
             )
             self._check_required_attributes(findings, intent, request)
 
@@ -541,6 +575,9 @@ class PolicyEngine:
                 condition=request.amount <= remaining_budget,
                 code="DAILY_BUDGET_EXCEEDED",
                 failure="The action exceeds the agent's remaining daily budget.",
+                context=FindingContext(
+                    limit=remaining_budget, actual=request.amount
+                ),
             )
 
         derived_risk, risk_signals = self._derive_risk(
@@ -928,13 +965,31 @@ class PolicyEngine:
                     ),
                 ),
             )
-            self._approvals[request_id] = replace(
+            resolved = replace(
                 approval,
                 status=ApprovalStatus.APPROVED,
                 reviewer=reviewer,
                 reason=reason,
                 resolved_at=resolution_time,
             )
+            result = self._issue_authorization_unlocked(
+                request,
+                approved_decision,
+                evaluation_time=resolution_time,
+                lease_ttl=lease_ttl,
+                # The REVIEW record for this request_id is already ours; this
+                # replaces it rather than claiming it. Ownership of the
+                # resolution is settled by the approval transition below.
+                claim=False,
+            )
+            # The status read at the top of this method may be stale by now.
+            # Only the caller that moves the row out of PENDING keeps what it
+            # just issued.
+            if not self._claim_approval_unlocked(resolved, request, result):
+                return self._yield_resolved_approval_unlocked(
+                    request_id, request, result, now=resolution_time
+                )
+            self._approvals[request_id] = resolved
             self.audit_ledger.append(
                 "approval.approved",
                 {
@@ -943,12 +998,6 @@ class PolicyEngine:
                     "reviewer": reviewer,
                     "reason": reason,
                 },
-            )
-            result = self._issue_authorization_unlocked(
-                request,
-                approved_decision,
-                evaluation_time=resolution_time,
-                lease_ttl=lease_ttl,
             )
             self._persist_state_unlocked()
             return result
@@ -993,10 +1042,7 @@ class PolicyEngine:
                     ),
                 ),
             )
-            self._authorizations[request_id] = (
-                request,
-                AuthorizationResult(decision=rejected_decision),
-            )
+            rejected_result = AuthorizationResult(decision=rejected_decision)
             rejected = replace(
                 approval,
                 status=ApprovalStatus.REJECTED,
@@ -1004,6 +1050,12 @@ class PolicyEngine:
                 reason=reason,
                 resolved_at=resolution_time,
             )
+            # Same transition guard as approve_action, so a concurrent approve
+            # and reject of one request_id cannot both succeed and leave a
+            # rejected request holding a live lease.
+            if not self._claim_approval_unlocked(rejected, request, rejected_result):
+                return self._reread_resolved_approval_unlocked(request_id)
+            self._authorizations[request_id] = (request, rejected_result)
             self._approvals[request_id] = rejected
             self.audit_ledger.append(
                 "approval.rejected",
@@ -1024,8 +1076,14 @@ class PolicyEngine:
         *,
         evaluation_time: datetime,
         lease_ttl: timedelta,
+        claim: bool = True,
     ) -> AuthorizationResult:
-        """Reserve budget and issue a lease while the engine lock is held."""
+        """Reserve budget and issue a lease while the engine lock is held.
+
+        ``claim`` asks for exclusive ownership of the request_id before the
+        reservation is kept. Pass ``False`` only when the caller already owns
+        the record and is replacing it, as :meth:`approve_action` does.
+        """
 
         expires_at = evaluation_time + lease_ttl
         budget_date = evaluation_time.date()
@@ -1067,9 +1125,6 @@ class PolicyEngine:
         )
         if self.lease_signer is not None:
             lease = self.lease_signer.sign(lease)
-        self._authorization_counts[(request.agent_id, budget_date)] += 1
-        self._leases[lease.lease_id] = lease
-
         decision = replace(
             decision,
             remaining_daily_budget=max(
@@ -1082,6 +1137,21 @@ class PolicyEngine:
             reservation=reservation,
             lease=lease,
         )
+        # The idempotency check at the top of authorize_action read state that
+        # another replica may have written since. Claiming the request_id is
+        # the only indivisible point in this flow, so it decides who keeps the
+        # reservation.
+        if claim and not self._claim_authorization_unlocked(request, result):
+            return self._yield_duplicate_unlocked(
+                request, reservation, now=evaluation_time
+            )
+
+        self._authorization_counts[(request.agent_id, budget_date)] = (
+            self._increment_authorization_count_unlocked(
+                request.agent_id, budget_date
+            )
+        )
+        self._leases[lease.lease_id] = lease
         self._authorizations[request.request_id] = (request, result)
         self.audit_ledger.append(
             "budget.reserved",
@@ -1096,6 +1166,217 @@ class PolicyEngine:
             },
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Counters and epochs
+    #
+    # Each of these was a read-modify-write in Python whose result save()
+    # merged, so concurrent replicas lost increments. The repository now
+    # advances each value in one database statement and returns the
+    # authoritative result. Without a repository there is a single process by
+    # construction, and the engine lock is already sufficient.
+    # ------------------------------------------------------------------
+
+    POLICY_VERSION_PREFIX = "2026.07.r"
+
+    def _increment_authorization_count_unlocked(
+        self, agent_id: str, day: date
+    ) -> int:
+        if self.state_repository is None:
+            self._authorization_counts[(agent_id, day)] += 1
+            return self._authorization_counts[(agent_id, day)]
+        return self.state_repository.increment_authorization_count(agent_id, day)
+
+    def _next_fleet_epoch_unlocked(self) -> int:
+        if self.state_repository is None:
+            return self._fleet_epoch + 1
+        return self.state_repository.next_fleet_epoch(
+            policy_version=self.policy_version
+        )
+
+    def _resume_fleet_unlocked(self, expected_epoch: int) -> bool:
+        if self.state_repository is None:
+            return True
+        return self.state_repository.resume_fleet(expected_epoch=expected_epoch)
+
+    def _next_revocation_epoch_unlocked(self, agent_id: str) -> int:
+        if self.state_repository is None:
+            return self._revocation_epochs.get(agent_id, 0) + 1
+        return self.state_repository.next_revocation_epoch(agent_id)
+
+    def _next_policy_revision_unlocked(self) -> tuple[int, str]:
+        if self.state_repository is None:
+            revision = self._policy_revision + 1
+            return revision, f"{self.POLICY_VERSION_PREFIX}{revision}"
+        return self.state_repository.next_policy_revision(
+            version_prefix=self.POLICY_VERSION_PREFIX
+        )
+
+    def _release_if_held_unlocked(
+        self, reservation: BudgetReservation | LedgerReservation, *, reason: str
+    ) -> bool:
+        """Release a hold, tolerating a replica that got there first.
+
+        A fleet stop and a revocation both sweep every hold they can see. Two
+        replicas sweeping at once will each try to release the same
+        reservations, and the loser must not abort the sweep: an exception here
+        propagates before the stop is persisted, which would leave the audit
+        trail saying the fleet stopped while the database still says it is
+        running.
+        """
+
+        try:
+            self._release_reservation_unlocked(reservation, reason=reason)
+        except (ValueError, KeyError):
+            # Already committed, released or expired by another replica. The
+            # hold is off the books either way, which is all the sweep wanted,
+            # and whoever resolved it recorded its own audit event.
+            return False
+        return True
+
+    def _claim_approval_unlocked(
+        self,
+        approval: HumanApproval,
+        request: ActionRequest,
+        result: AuthorizationResult,
+    ) -> bool:
+        """Whether this replica performed the pending-to-resolved transition."""
+
+        if self.state_repository is None:
+            # No shared store, so a single process by construction. The status
+            # was checked under the engine lock and cannot have moved since.
+            return True
+        return self.state_repository.claim_approval_transition(
+            approval.request_id, approval, request, result
+        )
+
+    def _reread_resolved_approval_unlocked(self, request_id: str) -> HumanApproval:
+        """Return the approval as the caller that won the transition left it.
+
+        Applies the same status rules as the top of the resolution methods, so
+        losing a race reads exactly like arriving after the winner had already
+        finished.
+        """
+
+        self._refresh_state_unlocked()
+        resolved = self._approvals.get(request_id)
+        if resolved is None:
+            raise ValueError(
+                "The approval was resolved concurrently and could not be read "
+                "back."
+            )
+        if resolved.status is ApprovalStatus.APPROVED:
+            raise ValueError("The approval request has already been approved.")
+        return resolved
+
+    def _yield_resolved_approval_unlocked(
+        self,
+        request_id: str,
+        request: ActionRequest,
+        result: AuthorizationResult,
+        *,
+        now: datetime,
+    ) -> AuthorizationResult:
+        """Give back what this replica issued and return the winner's outcome.
+
+        Nothing this replica did was persisted -- the reservation is the only
+        durable trace -- so releasing it and reloading state discards the lease,
+        the counter increment and the authorization record in one step.
+        """
+
+        if result.reservation is not None:
+            self.budget_ledger.release(
+                result.reservation.reservation_id,
+                now=now,
+                reason="duplicate_approval",
+            )
+        self._refresh_state_unlocked()
+        resolved = self._approvals.get(request_id)
+        if resolved is not None and resolved.status is ApprovalStatus.REJECTED:
+            raise ValueError("The approval request has already been rejected.")
+        winner = self._authorizations.get(request_id)
+        if winner is None:
+            raise ValueError(
+                "The approval was resolved concurrently and its authorization "
+                "could not be read back."
+            )
+        self.audit_ledger.append(
+            "approval.duplicate_released",
+            {
+                "request_id": request_id,
+                "agent_id": request.agent_id,
+                "released_reservation_id": (
+                    result.reservation.reservation_id
+                    if result.reservation is not None
+                    else None
+                ),
+                "winning_reviewer": resolved.reviewer if resolved else None,
+            },
+        )
+        return winner[1]
+
+    def _claim_authorization_unlocked(
+        self, request: ActionRequest, result: AuthorizationResult
+    ) -> bool:
+        """Whether this replica won exclusive ownership of the request_id."""
+
+        if self.state_repository is None:
+            # No shared store, so a single process by construction and the
+            # engine lock is already the whole guard.
+            return request.request_id not in self._authorizations
+        return self.state_repository.claim_authorization(
+            request.request_id, request, result
+        )
+
+    def _yield_duplicate_unlocked(
+        self,
+        request: ActionRequest,
+        reservation: BudgetReservation,
+        *,
+        now: datetime,
+    ) -> AuthorizationResult:
+        """Give back a reservation that lost the race, and return the winner's.
+
+        Losing means another replica authorized this exact request_id while we
+        were evaluating it. Ours is the duplicate: the funds go back, and the
+        caller receives the authorization that won, so a retried request_id
+        resolves to one reservation and one lease no matter how many replicas
+        answered it.
+        """
+
+        self.budget_ledger.release(
+            reservation.reservation_id,
+            now=now,
+            reason="duplicate_authorization",
+        )
+        winner = (
+            self.state_repository.get_authorization(request.request_id)
+            if self.state_repository is not None
+            else self._authorizations.get(request.request_id)
+        )
+        if winner is None:
+            # The winner's row vanished between losing the claim and reading
+            # it. Refusing is the only safe answer: we released our hold, so
+            # returning any result here would hand out an unfunded lease.
+            raise ValueError(
+                "The request was authorized concurrently and its record could "
+                "not be read back."
+            )
+        self._authorizations[request.request_id] = winner
+        self.audit_ledger.append(
+            "authorization.duplicate_released",
+            {
+                "request_id": request.request_id,
+                "agent_id": request.agent_id,
+                "released_reservation_id": reservation.reservation_id,
+                "winning_reservation_id": (
+                    winner[1].reservation.reservation_id
+                    if winner[1].reservation is not None
+                    else None
+                ),
+            },
+        )
+        return winner[1]
 
     @staticmethod
     def _conflicting_fields(
@@ -1249,6 +1530,13 @@ class PolicyEngine:
                         "The action exceeds the agent's remaining daily budget."
                     ),
                     blocking=True,
+                    # A lost race for headroom: another replica took the
+                    # remainder, so the headroom this request faced really is
+                    # zero. Reporting the pre-race figure would be a number the
+                    # request never had.
+                    context=FindingContext(
+                        limit=Decimal("0"), actual=request.amount
+                    ),
                 ),
             ),
         )
@@ -1468,10 +1756,13 @@ class PolicyEngine:
         condition: bool,
         code: str,
         failure: str,
+        context: FindingContext | None = None,
     ) -> None:
         if not condition:
             findings.append(
-                PolicyFinding(code=code, message=failure, blocking=True)
+                PolicyFinding(
+                    code=code, message=failure, blocking=True, context=context
+                )
             )
 
     @staticmethod

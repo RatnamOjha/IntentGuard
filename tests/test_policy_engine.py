@@ -229,6 +229,105 @@ class PolicyEngineTest(unittest.TestCase):
             {finding.code for finding in result.findings},
         )
 
+    def _finding(self, result, code):
+        matches = [f for f in result.findings if f.code == code]
+        self.assertEqual(1, len(matches), f"expected exactly one {code}")
+        return matches[0]
+
+    def test_agent_action_limit_carries_the_limit_and_the_breach(self) -> None:
+        result = self.engine.evaluate(self.action(amount="25000"), now=self.now)
+        finding = self._finding(result, "AGENT_ACTION_LIMIT")
+        self.assertIsNotNone(finding.context)
+        assert finding.context is not None
+        self.assertEqual(Decimal("20000"), finding.context.limit)
+        self.assertEqual(Decimal("25000"), finding.context.actual)
+        self.assertIsNone(finding.context.permitted)
+
+    def test_intent_amount_exceeded_carries_the_intent_ceiling(self) -> None:
+        result = self.engine.evaluate(self.action(amount="19000"), now=self.now)
+        finding = self._finding(result, "INTENT_AMOUNT_EXCEEDED")
+        assert finding.context is not None
+        self.assertEqual(Decimal("18000"), finding.context.limit)
+        self.assertEqual(Decimal("19000"), finding.context.actual)
+
+    def test_daily_budget_exceeded_carries_remaining_headroom(self) -> None:
+        self.engine.register_intent(
+            IntentPassport(
+                intent_id="intent-big",
+                customer_id="customer-01",
+                agent_id="travel-01",
+                action="book_flight",
+                max_amount=Decimal("60000"),
+                currency="INR",
+                expires_at=self.now + timedelta(hours=1),
+                required_attributes={"refundable": True},
+            )
+        )
+        request = ActionRequest(
+            request_id="request-budget",
+            agent_id="travel-01",
+            action="book_flight",
+            amount=Decimal("40000"),
+            currency="INR",
+            intent_id="intent-big",
+            risk_score=20,
+            attributes={"refundable": True},
+            occurred_at=self.now,
+        )
+        result = self.engine.evaluate(request, now=self.now)
+        finding = self._finding(result, "DAILY_BUDGET_EXCEEDED")
+        assert finding.context is not None
+        # The whole daily budget is still available, so headroom is the cap.
+        self.assertEqual(Decimal("30000"), finding.context.limit)
+        self.assertEqual(Decimal("40000"), finding.context.actual)
+
+    def test_action_not_permitted_carries_the_permitted_set(self) -> None:
+        request = ActionRequest(
+            request_id="request-forbidden",
+            agent_id="travel-01",
+            action="wire_transfer",
+            amount=Decimal("100"),
+            currency="INR",
+            intent_id="intent-01",
+            risk_score=20,
+            attributes={"refundable": True},
+            occurred_at=self.now,
+        )
+        result = self.engine.evaluate(request, now=self.now)
+        finding = self._finding(result, "ACTION_NOT_PERMITTED")
+        assert finding.context is not None
+        self.assertEqual(frozenset({"book_flight"}), finding.context.permitted)
+        self.assertIsNone(finding.context.limit)
+
+    def test_boolean_checks_carry_no_context(self) -> None:
+        """Only comparisons with operands worth showing get a context."""
+        self.engine.stop_fleet(reason="Incident response")
+        result = self.engine.evaluate(self.action(), now=self.now)
+        self.assertIsNone(self._finding(result, "FLEET_STOPPED").context)
+
+    def test_context_never_echoes_request_supplied_text(self) -> None:
+        """Attacker-controlled attributes must not reach the operator's screen."""
+        marker = "<script>alert(1)</script>"
+        request = ActionRequest(
+            request_id="request-inject",
+            agent_id="travel-01",
+            action="wire_transfer",
+            amount=Decimal("25000"),
+            currency="INR",
+            intent_id="intent-01",
+            risk_score=20,
+            attributes={"refundable": True, "note": marker},
+            occurred_at=self.now,
+        )
+        result = self.engine.evaluate(request, now=self.now)
+        contexts = [f.context for f in result.findings if f.context is not None]
+        self.assertTrue(contexts, "expected at least one finding with context")
+        for context in contexts:
+            self.assertNotIn(marker, str(context.permitted))
+            for value in (context.limit, context.actual):
+                self.assertTrue(value is None or isinstance(value, Decimal))
+
+
     def test_audit_chain_verifies(self) -> None:
         result = self.engine.evaluate(self.action(), now=self.now)
         self.engine.record_execution(

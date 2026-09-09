@@ -1,0 +1,106 @@
+Idempotency across replicas: before and after
+=============================================
+
+Date:        2026-09-02
+Environment: macOS-26.2-arm64-arm-64bit | arm64 | CPython 3.12.2
+Database:    PostgreSQL 15.15 (Homebrew), local unix socket
+Reproduce:   INTENTGUARD_DATABASE_URL=postgresql:///<db> PYTHONPATH=src \
+               python -m unittest tests.test_persistence.ConcurrentIdempotencyTest
+
+The defect
+----------
+authorize_action read the stored authorization for a request_id and, on a miss,
+issued a fresh reservation and lease. The engine's RLock made that check-then-act
+atomic within one process and did nothing across two, which is the deployment
+the project documents.
+
+The daily cap was never breached -- every duplicate reservation was counted
+against it -- which is why neither the adversarial suite nor the 8-process cap
+test caught this. Both assert on the cap, and the cap was fine.
+authorization_records also showed a single row, because _sync_authorizations
+writes with ON CONFLICT DO UPDATE. The idempotency table looked correct while
+the money did not.
+
+Method
+------
+Eight replicas in separate OS processes (multiprocessing spawn), each with its
+own PolicyEngine and its own in-process lock, sharing one Postgres. All eight
+released from a barrier and called authorize_action with the same request_id
+for 100. The agent's daily budget is 1,000,000 so that no duplicate is masked
+by the cap refusing it.
+
+BEFORE
+------
+    ('allow', 'res_bc2492748a024d72b9e2ca7f95e2e811', 'lease_b6be81e32aec...')
+    ('allow', 'res_7ab3f027fcc74663a445cb7715c53910', 'lease_7932ba279afc...')
+    ('allow', 'res_3e550991ef204fb0b70ae1a7eb77abb1', 'lease_7b3a3ce91eec...')
+    ('allow', 'res_6da8a524575e469fad52cee0d04cd376', 'lease_410f5de9b1a1...')
+    ('allow', 'res_ee4b9a8b86624da7823c81ed99f3707a', 'lease_505ae3cdfc60...')
+    ('allow', 'res_c3e63c244a20422e81e17a7ff0a4f3e1', 'lease_6c715ae1f71c...')
+    ('allow', 'res_e0fb975790ce40bf8970589d0744e30f', 'lease_1da5fb392e11...')
+    ('allow', 'res_97b1e8dd2153455cbf1c0be58d82bd54', 'lease_53238bcf4e65...')
+
+    authorization_records rows for that request_id : 1
+    distinct lease_ids handed back to callers      : 8
+    reservations held for that request_id          : 8
+    budget_days (committed, reserved)              : (0.0000, 800.0000)
+
+Eight independently committable leases for one request_id. commit_reservation
+guards against replay by checking reservation *status*, and there were eight
+separate reservations, so nothing stopped eight refunds.
+
+The two regression tests fail against this code:
+
+    AssertionError: 1 != 8 : One request_id held 8 reservations
+    AssertionError: Decimal('100') != Decimal('800.0000')
+
+AFTER
+-----
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+    ('allow', 'res_85fdf9d590684b17a2ae383268ee3e1e', 'lease_992c50507330...')
+
+    authorization_records rows for that request_id : 1
+    distinct lease_ids handed back to callers      : 1
+    reservations for that request_id               : 8  (1 held, 7 released)
+    budget_days (committed, reserved)              : (0.0000, 100.0000)
+
+Every replica returns the same reservation and the same lease. Seven duplicate
+holds were created and given straight back, each carrying an
+`authorization.duplicate_released` audit event naming the reservation that was
+released and the one that won.
+
+The fix
+-------
+StateRepository gains one indivisible operation:
+
+    claim_authorization(request_id, request, result) -> bool
+
+Postgres implements it as INSERT ... ON CONFLICT DO NOTHING ... RETURNING, so
+exactly one caller gets a row back under concurrency. The in-memory repository
+does the same check under its existing lock.
+
+_issue_authorization_unlocked claims the request_id after reserving budget and
+before keeping the reservation. A caller that loses releases its own hold, reads
+the winning record, and returns that -- so a retried request_id resolves to one
+reservation and one lease however many replicas answered it.
+
+approve_action passes claim=False: it already owns the REVIEW record for that
+request_id and is replacing it, not claiming it.
+
+What this does not cover
+------------------------
+approve_action has the same check-then-act shape -- it reads the approval,
+sees PENDING, and issues a lease -- so two concurrent approvals of one
+request_id can still produce two reservations. Different code path, different
+primitive (a conditional UPDATE on the approval row rather than an insert), and
+deliberately not bundled into this commit. Not yet reproduced with a test.
+
+Losing replicas still evaluate and reserve before discovering they lost. That
+is wasted work under contention, not incorrect, and removing it needs the
+per-entity read path in ADR 005.

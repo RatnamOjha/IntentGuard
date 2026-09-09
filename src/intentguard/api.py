@@ -271,33 +271,41 @@ class PolicyCompare(BaseModel):
 
 
 def seed_demo_engine(engine: PolicyEngine) -> None:
-    """Populate a deterministic three-agent sandbox for the operator console."""
+    """Populate a deterministic refund sandbox for the operator console.
+
+    The story the console tells: a company runs AI support agents that can
+    issue refunds. Ada handles routine tickets, Bo handles escalations, and
+    Cy adjusts billing but is not allowed to move money at all. Every limit
+    below is the kind a support lead would actually set.
+    """
 
     agents = (
         AgentProfile(
-            agent_id="agt_travel_01",
-            name="Atlas",
-            allowed_actions=frozenset({"book_flight", "book_hotel"}),
-            max_action_amount=Decimal("50000"),
-            daily_budget=Decimal("100000"),
+            agent_id="agt_refund_01",
+            name="Ada",
+            allowed_actions=frozenset({"refund_order", "issue_goodwill_credit"}),
+            # Tier-one refunds: small, frequent, no human in the loop.
+            max_action_amount=Decimal("500"),
+            daily_budget=Decimal("20000"),
         ),
         AgentProfile(
-            agent_id="agt_service_02",
-            name="Nova",
+            agent_id="agt_refund_02",
+            name="Bo",
             allowed_actions=frozenset(
-                {"issue_service_credit", "replace_card", "reverse_annual_fee"}
+                {"refund_order", "issue_goodwill_credit", "refund_shipping"}
             ),
-            max_action_amount=Decimal("70000"),
-            daily_budget=Decimal("75000"),
-        ),
-        AgentProfile(
-            agent_id="agt_benefits_03",
-            name="Orbit",
-            allowed_actions=frozenset(
-                {"activate_benefit", "submit_benefit_claim"}
-            ),
-            max_action_amount=Decimal("40000"),
+            # Escalations: larger single refunds, still capped for the day.
+            max_action_amount=Decimal("5000"),
             daily_budget=Decimal("50000"),
+        ),
+        AgentProfile(
+            agent_id="agt_billing_03",
+            name="Cy",
+            # Deliberately cannot refund. Cy exists to show that "what an agent
+            # may do" is enforced, not merely documented in a prompt.
+            allowed_actions=frozenset({"cancel_subscription", "apply_discount"}),
+            max_action_amount=Decimal("2500"),
+            daily_budget=Decimal("15000"),
         ),
     )
     for agent in agents:
@@ -306,100 +314,72 @@ def seed_demo_engine(engine: PolicyEngine) -> None:
     expires_at = datetime.now(timezone.utc) + timedelta(days=1)
     intents = (
         IntentPassport(
-            intent_id="intent_seed_atlas",
+            intent_id="intent_refund_routine",
             customer_id="demo-customer",
-            agent_id="agt_travel_01",
-            action="book_hotel",
-            max_amount=Decimal("50000"),
+            agent_id="agt_refund_01",
+            action="refund_order",
+            max_amount=Decimal("500"),
             currency="INR",
             expires_at=expires_at,
         ),
         IntentPassport(
-            intent_id="intent_seed_nova",
+            intent_id="intent_refund_escalated",
             customer_id="demo-customer",
-            agent_id="agt_service_02",
-            action="issue_service_credit",
-            max_amount=Decimal("70000"),
+            agent_id="agt_refund_02",
+            action="refund_order",
+            max_amount=Decimal("5000"),
             currency="INR",
             expires_at=expires_at,
         ),
         IntentPassport(
-            intent_id="intent_seed_orbit",
+            intent_id="intent_goodwill_credit",
             customer_id="demo-customer",
-            agent_id="agt_benefits_03",
-            action="submit_benefit_claim",
-            max_amount=Decimal("40000"),
+            agent_id="agt_refund_02",
+            action="issue_goodwill_credit",
+            max_amount=Decimal("5000"),
             currency="INR",
             expires_at=expires_at,
         ),
         IntentPassport(
-            intent_id="intent_travel_booking",
+            intent_id="intent_billing_change",
             customer_id="demo-customer",
-            agent_id="agt_travel_01",
-            action="book_hotel",
-            max_amount=Decimal("18000"),
-            currency="INR",
-            expires_at=expires_at,
-            required_attributes={"city": "BOM", "refundable": True},
-        ),
-        IntentPassport(
-            intent_id="intent_service_credit",
-            customer_id="demo-customer",
-            agent_id="agt_service_02",
-            action="issue_service_credit",
-            max_amount=Decimal("25000"),
-            currency="INR",
-            expires_at=expires_at,
-        ),
-        IntentPassport(
-            intent_id="intent_external_payment",
-            customer_id="demo-customer",
-            agent_id="agt_benefits_03",
-            action="pay_external_merchant",
-            max_amount=Decimal("35000"),
-            currency="INR",
-            expires_at=expires_at,
-        ),
-        IntentPassport(
-            intent_id="intent_fee_reversal",
-            customer_id="demo-customer",
-            agent_id="agt_service_02",
-            action="reverse_annual_fee",
-            max_amount=Decimal("10000"),
+            agent_id="agt_billing_03",
+            action="cancel_subscription",
+            max_amount=Decimal("2500"),
             currency="INR",
             expires_at=expires_at,
         ),
     )
     for intent in intents:
-        # These records are fixed admin-only demo fixtures, not customer input.
         engine.register_intent(intent, verify=False)
 
+    # A little committed spend, so the console does not open on empty charts.
     seed_actions = (
         ActionRequest(
-            request_id="seed_atlas_spend",
-            agent_id="agt_travel_01",
-            action="book_hotel",
-            amount=Decimal("48320"),
+            request_id="seed_refund_ada",
+            agent_id="agt_refund_01",
+            action="refund_order",
+            amount=Decimal("240"),
             currency="INR",
-            intent_id="intent_seed_atlas",
-            risk_score=10,
+            intent_id="intent_refund_routine",
+            risk_score=8,
         ),
         ActionRequest(
-            request_id="seed_nova_spend",
-            agent_id="agt_service_02",
-            action="issue_service_credit",
-            amount=Decimal("69200"),
+            request_id="seed_refund_bo",
+            agent_id="agt_refund_02",
+            action="refund_order",
+            amount=Decimal("1800"),
             currency="INR",
-            intent_id="intent_seed_nova",
-            risk_score=10,
+            intent_id="intent_refund_escalated",
+            risk_score=12,
         ),
         ActionRequest(
-            request_id="seed_orbit_spend",
-            agent_id="agt_benefits_03",
-            action="submit_benefit_claim",
-            amount=Decimal("18600"),
+            request_id="seed_billing_cy",
+            agent_id="agt_billing_03",
+            action="cancel_subscription",
+            amount=Decimal("600"),
             currency="INR",
-            intent_id="intent_seed_orbit",
+            intent_id="intent_billing_change",
             risk_score=10,
         ),
     )

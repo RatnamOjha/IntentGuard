@@ -1,0 +1,142 @@
+Approval transitions across replicas: before and after
+======================================================
+
+Date:        2026-09-02
+Environment: macOS-26.2-arm64-arm-64bit | arm64 | CPython 3.12.2
+Database:    PostgreSQL 15.15 (Homebrew), local unix socket
+Reproduce:   INTENTGUARD_DATABASE_URL=postgresql:///<db> PYTHONPATH=src \
+               python -m unittest tests.test_persistence.ConcurrentApprovalTest
+
+The defect
+----------
+approve_action read the approval, saw PENDING, and issued a lease. Same
+check-then-act shape authorize_action had, fixed in d0cee1c: atomic within one
+process because of the engine lock, unguarded across two. reject_action had it
+too, against the same row.
+
+Method
+------
+Eight replicas in separate OS processes (multiprocessing spawn), each with its
+own PolicyEngine and its own in-process lock, sharing one Postgres. A risk-100
+action is authorized first, leaving one PENDING approval. All replicas then
+release from a barrier and resolve it. The agent's daily budget is 1,000,000 so
+no duplicate is masked by the cap refusing it.
+
+"Before" was measured against the tree at d0cee1c, reconstructed with
+`git show`, not against a description of it.
+
+BEFORE -- 8 concurrent approvers
+--------------------------------
+    distinct leases handed to approvers : 8
+    reservations by status              : [('held', 8)]
+    budget_days (committed, reserved)   : (0.0000, 800.0000)
+    final approval (status, reviewer)   : ('approved', 'rev-5')
+    audit events                        : [('approval.approved', 8)]
+
+Eight independently committable leases for one approved action, 800 held for a
+request of 100, and eight reviewers each recorded as having approved it. The
+approval row itself looks settled -- one status, one reviewer -- because the
+last writer wins. Only the audit trail and the reservations show what happened.
+
+BEFORE -- 4 approvers racing 4 rejecters
+----------------------------------------
+    distinct leases handed to approvers : 4
+    reservations by status              : [('held', 4)]
+    budget_days (committed, reserved)   : (1200.0000 cumulative, see note)
+    final approval (status, reviewer)   : ('approved', 'rev-6')
+    audit events                        : [('approval.approved', 4),
+                                            ('approval.rejected', 4)]
+
+Worse than the pure-approve case. The same request_id was recorded as approved
+four times and rejected four times, and four live leases existed for an action
+four reviewers had rejected. A rejected refund could still be executed.
+
+(The 1200 figure is cumulative across both scenarios in one run, which share an
+agent; the 4 held reservations for this request are the number that matters.)
+
+AFTER -- 8 concurrent approvers
+-------------------------------
+    distinct leases handed to approvers : 1
+    reservations by status              : [('held', 1), ('released', 7)]
+    budget_days (committed, reserved)   : (0.0000, 100.0000)
+    final approval (status, reviewer)   : ('approved', 'rev-7')
+    audit events                        : [('approval.approved', 1),
+                                            ('approval.duplicate_released', 7)]
+
+Every replica returns the winner's lease. Seven duplicate holds were created
+and given straight back, each leaving an audit event naming the released
+reservation and the winning reviewer. One approval, one audit event.
+
+AFTER -- 4 approvers racing 4 rejecters
+---------------------------------------
+    distinct leases handed to approvers : 0
+    reservations by status              : [('released', 4)]
+    final approval (status, reviewer)   : ('rejected', 'rev-1')
+    audit events                        : [('approval.rejected', 1)]
+
+The rejection won. Every approver raised the same error the non-racing path
+raises for an already-rejected approval, and released the reservation it had
+taken. No lease exists for a rejected request.
+
+Regression tests
+----------------
+tests.test_persistence.ConcurrentApprovalTest, 8 real processes. Against the
+pre-fix tree:
+
+    AssertionError: 1 != 8 : One approval handed out 8 distinct leases
+    AssertionError: Decimal('100') != Decimal('800.0000')
+    AssertionError: 1 != 8 : One approval produced 8 approval.approved events,
+        by ['reviewer-7', 'reviewer-6', 'reviewer-4', 'reviewer-1',
+            'reviewer-2', 'reviewer-0', 'reviewer-3', 'reviewer-5']
+
+Note the third assertion is on the audit trail, not the approval row. Asserting
+on the row alone does not detect this race: every replica writes APPROVED and
+the last writer wins, so the row looks correct either way.
+
+The fix
+-------
+StateRepository gains one operation:
+
+    claim_approval_transition(request_id, approval, request, result) -> bool
+
+Postgres implements it as a conditional UPDATE and an authorization write in
+ONE transaction:
+
+    UPDATE approval_requests SET payload = <resolved approval>
+     WHERE request_id = %s AND payload -> 'status' ->> 'value' = 'pending'
+    RETURNING request_id;
+    -- only if a row came back, same transaction:
+    INSERT INTO authorization_records (...) ON CONFLICT (request_id) DO UPDATE ...
+
+Under READ COMMITTED a second caller blocks on the row until the first commits,
+then re-evaluates the predicate against the committed row and matches zero
+rows. The in-memory repository does the same check under its existing lock.
+
+Why both writes are in one transaction: resolving the approval first and
+storing the authorization afterwards leaves a window where the row says
+"approved" while the stored authorization is still the superseded REVIEW
+result. A loser reading in that window returns the wrong decision. Writing them
+together means that by the time a caller is told it lost, the winner's result
+is already readable.
+
+Ordering in approve_action mirrors the authorize fix: validate, issue (reserve
+budget and sign the lease), claim the transition, and on a loss release the
+reservation and return the winner's outcome. Nothing else was persisted, so
+reloading state discards this replica's lease, counter increment and
+authorization record in one step.
+
+The audit append moved to after the claim. A replica that lost the transition
+approved nothing and must not say it did.
+
+reject_action uses the same primitive against the same row, which is what makes
+concurrent approve-and-reject mutually exclusive.
+
+Not covered
+-----------
+Losing replicas still evaluate and reserve before discovering they lost. Wasted
+work under contention, not incorrect; removing it needs the per-entity read
+path from ADR 005.
+
+Cross-ledger atomicity is unchanged: budget, state and audit remain separate
+transactions, so a crash mid-operation can still leave a reservation with no
+resolved approval. ADR 005 Risk 3.

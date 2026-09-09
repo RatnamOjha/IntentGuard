@@ -1,9 +1,20 @@
 export type ApiDecision = "allow" | "deny" | "review";
 
+/** The values the engine itself compared. Absent for boolean checks. */
+export type ApiFindingContext = {
+  /** The ceiling policy set, in the request's currency. */
+  limit: string | number | null;
+  /** The value that breached `limit`. Engine-side, never echoed request text. */
+  actual: string | number | null;
+  /** Actions this agent's policy permits. Unordered -- sort before display. */
+  permitted: string[] | null;
+};
+
 export type ApiFinding = {
   code: string;
   message: string;
   blocking: boolean;
+  context: ApiFindingContext | null;
 };
 
 export type ApiRiskAssessment = {
@@ -154,6 +165,37 @@ const OPERATOR_ACCESS_TOKEN =
 const REVIEWER_ACCESS_TOKEN =
   process.env.NEXT_PUBLIC_INTENTGUARD_REVIEWER_ACCESS_TOKEN ?? ACCESS_TOKEN;
 
+/**
+ * A bearer token names the single agent it may act for, so driving several
+ * agents needs one token each. Keyed by agent id; falls back to the single
+ * agent token when the map is absent.
+ */
+const AGENT_TOKENS: Record<string, string> = (() => {
+  const raw = process.env.NEXT_PUBLIC_INTENTGUARD_AGENT_TOKENS;
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return {};
+  }
+})();
+
+function tokenForAgent(agentId: string) {
+  return AGENT_TOKENS[agentId] ?? AGENT_ACCESS_TOKEN;
+}
+
+/** An API error that keeps its HTTP status, so 401 can be told from a
+ *  network failure. Both used to surface as "Backend offline". */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function apiRequest<T>(
   path: string,
   init?: RequestInit,
@@ -172,7 +214,10 @@ async function apiRequest<T>(
     const body = (await response.json().catch(() => null)) as
       | { detail?: string }
       | null;
-    throw new Error(body?.detail ?? `IntentGuard API returned ${response.status}.`);
+    throw new ApiError(
+      body?.detail ?? `IntentGuard API returned ${response.status}.`,
+      response.status,
+    );
   }
 
   if (response.status === 204) {
@@ -274,7 +319,7 @@ export function authorizeAction(payload: ActionPayload) {
       method: "POST",
       body: JSON.stringify(payload),
     },
-    AGENT_ACCESS_TOKEN,
+    tokenForAgent(payload.agent_id),
   );
 }
 

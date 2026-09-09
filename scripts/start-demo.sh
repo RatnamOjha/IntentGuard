@@ -10,8 +10,16 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo "pnpm is required. Install it with: npm install -g pnpm"
+# package.json pins pnpm@11.24.0, which is what CI installs with. Prefer
+# corepack so a different pnpm on PATH cannot produce a lockfile CI then
+# refuses -- exactly what happened when a local pnpm 10 relocked a tree CI
+# reads with pnpm 11.
+if command -v corepack >/dev/null 2>&1; then
+  PNPM=(corepack pnpm@11.24.0)
+elif command -v pnpm >/dev/null 2>&1; then
+  PNPM=(pnpm)
+else
+  echo "pnpm is required. Install Node 22+ (which ships corepack), or: npm install -g pnpm"
   exit 1
 fi
 
@@ -23,12 +31,14 @@ if ! "$VENV_PYTHON" -c "import intentguard, fastapi, uvicorn" >/dev/null 2>&1; t
   "$VENV_PYTHON" -m pip install -e "$PROJECT_DIR[api,dev]"
 fi
 
-if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vinext" ]]; then
-  (
-    cd "$FRONTEND_DIR"
-    pnpm install --frozen-lockfile
-  )
-fi
+# Probing for one binary is not proof the lockfile is satisfied: a partial or
+# stale node_modules that happens to contain vinext skipped the install and
+# then died on a missing cross-env. pnpm install is fast and a no-op when
+# everything already matches, so just run it.
+(
+  cd "$FRONTEND_DIR"
+  CI=true "${PNPM[@]}" install --frozen-lockfile
+)
 
 # The one-command demo uses an ephemeral issuer bound only to loopback. Run the
 # API directly with real JWT/JWKS settings in non-demo environments.
@@ -59,14 +69,18 @@ if ! curl --fail --silent \
   echo "The local JWKS server did not start within 10 seconds."
   exit 1
 fi
+# A token names the one agent it may act for -- the gateway rejects any
+# mismatch (api.py require_match). The console drives three demo agents, so it
+# needs three agent tokens, not one.
 issue_local_token() {
   local subject="$1"
   local role="$2"
+  local agent="${3:-agt_refund_01}"
   local response
   response="$(curl --fail --silent \
     -X POST http://127.0.0.1:9000/token \
     -H 'Content-Type: application/json' \
-    -d "{\"sub\":\"$subject\",\"roles\":[\"$role\"],\"agent_id\":\"agt_travel_01\",\"customer_id\":\"demo-customer\"}")"
+    -d "{\"sub\":\"$subject\",\"roles\":[\"$role\"],\"agent_id\":\"$agent\",\"customer_id\":\"demo-customer\"}")"
   printf '%s' "$response" | \
     "$VENV_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
 }
@@ -74,7 +88,15 @@ export NEXT_PUBLIC_INTENTGUARD_ACCESS_TOKEN="$(
   issue_local_token local-demo-admin admin
 )"
 export NEXT_PUBLIC_INTENTGUARD_AGENT_ACCESS_TOKEN="$(
-  issue_local_token local-demo-agent agent
+  issue_local_token local-demo-agent agent agt_refund_01
+)"
+# One token per demo agent, keyed by agent id, so a scenario can authorize as
+# whichever agent it belongs to.
+export NEXT_PUBLIC_INTENTGUARD_AGENT_TOKENS="$(
+  "$VENV_PYTHON" -c 'import json,sys; print(json.dumps(dict(zip(sys.argv[1::2], sys.argv[2::2]))))' \
+    agt_refund_01 "$(issue_local_token local-demo-agent-ada agent agt_refund_01)" \
+    agt_refund_02 "$(issue_local_token local-demo-agent-bo agent agt_refund_02)" \
+    agt_billing_03 "$(issue_local_token local-demo-agent-cy agent agt_billing_03)"
 )"
 export NEXT_PUBLIC_INTENTGUARD_OPERATOR_ACCESS_TOKEN="$(
   issue_local_token local-demo-operator operator
@@ -125,4 +147,4 @@ echo "Protected booking connector: http://127.0.0.1:8100"
 echo "IntentGuard console will use port 3000 or the next available local port."
 
 cd "$FRONTEND_DIR"
-pnpm run dev
+"${PNPM[@]}" run dev

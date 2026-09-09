@@ -38,6 +38,10 @@ class Principal:
     roles: frozenset[str]
     agent_id: str | None = None
     customer_id: str | None = None
+    # The organisation this caller acts for. Resolved from our own membership
+    # table for a bearer token, or carried directly by an API key -- never read
+    # from a token claim, so tenancy does not depend on an IdP's claim shape.
+    org_id: str | None = None
     claims: dict[str, Any] | None = None
 
     def has_any_role(self, permitted: frozenset[str]) -> bool:

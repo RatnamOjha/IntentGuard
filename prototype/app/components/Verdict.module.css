@@ -1,0 +1,194 @@
+.empty {
+  border: 1px dashed var(--line-firm);
+  border-radius: var(--r-lg);
+  background: transparent;
+  padding: 40px 30px;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+.emptyTitle {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+}
+.emptyBody {
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  max-width: 40ch;
+  line-height: 1.6;
+}
+
+.card {
+  border-radius: var(--r-lg);
+  padding: 24px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+  animation: land var(--base) var(--ease) both;
+}
+
+@keyframes land {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+.stop { border-color: var(--stop-line); background: linear-gradient(var(--stop-wash), var(--card) 130px); }
+.pass { border-color: var(--pass-line); background: linear-gradient(var(--pass-wash), var(--card) 130px); }
+.hold { border-color: var(--hold-line); background: linear-gradient(var(--hold-wash), var(--card) 130px); }
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.verdictLine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.stop .dot { background: var(--stop); }
+.pass .dot { background: var(--pass); }
+.hold .dot { background: var(--hold); }
+
+.verdict {
+  font-size: 1.5rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+.stop .verdict { color: var(--stop); }
+.pass .verdict { color: var(--pass); }
+.hold .verdict { color: var(--hold); }
+
+.latency {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+}
+
+.subhead {
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.headline {
+  margin-top: 16px;
+  font-size: 1.0625rem;
+  line-height: 1.5;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+  max-width: 46ch;
+}
+
+.rule {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+.ruleHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.ruleLabel {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+.ruleMessage {
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+.ruleLead {
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--ink);
+  letter-spacing: -0.008em;
+}
+
+.wouldPass {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+.wouldPass span {
+  display: block;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--pass);
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.amend {
+  margin-top: 14px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--accent);
+  background: var(--card);
+  color: var(--accent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: left;
+  transition: background var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.amend:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+.amend:active:not(:disabled) { transform: translateY(1px); }
+.amend:disabled { opacity: 0.45; }
+
+.also {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.alsoLabel {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  margin-right: 2px;
+}
+
+.foot {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+}
+.lease,
+.sealed {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+}
+.sealed { margin-left: auto; }

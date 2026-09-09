@@ -10,24 +10,38 @@ Start it with ``python examples/local_jwks_server.py``. Then request a token:
     curl -X POST http://127.0.0.1:9000/token \
       -H "Content-Type: application/json" \
       -d '{"sub":"demo-admin","roles":["admin"],
-           "agent_id":"agt_travel_01","customer_id":"demo-customer"}'
+           "agent_id":"agt_refund_01","customer_id":"demo-customer"}'
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-import math
-import secrets
+import os
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
 ISSUER = "http://127.0.0.1:9000"
 AUDIENCE = "intentguard-api"
 KEY_ID = "intentguard-local-dev"
-SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+KEY_SIZE_BITS = 2048
+
+# start-demo.sh mints the console's tokens once, at startup, and the browser
+# holds them for the life of the dev server -- nothing refreshes them. At the
+# original 15 minutes that meant the console began 401ing part-way through a
+# session, reported as "Backend offline", which reads as a crashed API rather
+# than an expired credential.
+#
+# Lifetime is not the trust boundary for this issuer: it binds to loopback and
+# mints any role to any caller with no authentication at all. The boundary is
+# that it is unreachable from anywhere else. So a long-lived token here costs
+# nothing real and removes a failure that looks like a product bug. Real
+# deployments use Keycloak, whose lifetimes are its own concern.
+TOKEN_TTL_MINUTES = int(os.getenv("INTENTGUARD_LOCAL_TOKEN_TTL_MINUTES", "720"))
 
 
 def _b64(value: bytes) -> str:
@@ -38,43 +52,15 @@ def _integer_bytes(value: int) -> bytes:
     return value.to_bytes((value.bit_length() + 7) // 8, "big")
 
 
-def _probable_prime(bits: int) -> int:
-    while True:
-        candidate = secrets.randbits(bits) | 1 | (1 << (bits - 1))
-        if any(candidate % prime == 0 for prime in (3, 5, 7, 11, 13, 17, 19)):
-            continue
-        odd_part = candidate - 1
-        powers = 0
-        while odd_part % 2 == 0:
-            powers += 1
-            odd_part //= 2
-        probably_prime = True
-        for _ in range(24):
-            base = secrets.randbelow(candidate - 3) + 2
-            value = pow(base, odd_part, candidate)
-            if value in (1, candidate - 1):
-                continue
-            for _ in range(powers - 1):
-                value = pow(value, 2, candidate)
-                if value == candidate - 1:
-                    break
-            else:
-                probably_prime = False
-                break
-        if probably_prime:
-            return candidate
-
-
-def _generate_key() -> tuple[int, int, int]:
-    exponent = 65537
-    while True:
-        first, second = _probable_prime(1024), _probable_prime(1024)
-        totient = (first - 1) * (second - 1)
-        if first != second and math.gcd(exponent, totient) == 1:
-            return first * second, exponent, pow(exponent, -1, totient)
-
-
-MODULUS, EXPONENT, PRIVATE_EXPONENT = _generate_key()
+# ``cryptography`` is already a hard dependency of the package, and it
+# guarantees an exactly ``KEY_SIZE_BITS``-bit modulus. The previous
+# hand-rolled generator built the modulus from two 1024-bit primes, which
+# lands in [2^2046, 2^2048) -- so 38% of startups produced a 2047-bit key
+# that the gateway correctly rejected as below its 2048-bit minimum.
+PRIVATE_KEY = rsa.generate_private_key(
+    public_exponent=65537, key_size=KEY_SIZE_BITS
+)
+_PUBLIC_NUMBERS = PRIVATE_KEY.public_key().public_numbers()
 JWKS = {
     "keys": [
         {
@@ -82,8 +68,8 @@ JWKS = {
             "use": "sig",
             "alg": "RS256",
             "kid": KEY_ID,
-            "n": _b64(_integer_bytes(MODULUS)),
-            "e": _b64(_integer_bytes(EXPONENT)),
+            "n": _b64(_integer_bytes(_PUBLIC_NUMBERS.n)),
+            "e": _b64(_integer_bytes(_PUBLIC_NUMBERS.e)),
         }
     ]
 }
@@ -103,7 +89,7 @@ def issue_token(request: dict[str, Any]) -> str:
         "iss": ISSUER,
         "aud": AUDIENCE,
         "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=15)).timestamp()),
+        "exp": int((now + timedelta(minutes=TOKEN_TTL_MINUTES)).timestamp()),
     }
     for name in ("agent_id", "customer_id"):
         value = request.get(name)
@@ -115,12 +101,7 @@ def issue_token(request: dict[str, Any]) -> str:
     encoded_header = _b64(json.dumps(header, separators=(",", ":")).encode())
     encoded_payload = _b64(json.dumps(payload, separators=(",", ":")).encode())
     signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
-    digest = SHA256_DIGEST_INFO + hashlib.sha256(signing_input).digest()
-    size = (MODULUS.bit_length() + 7) // 8
-    encoded = b"\x00\x01" + b"\xff" * (size - len(digest) - 3) + b"\x00" + digest
-    signature = pow(
-        int.from_bytes(encoded, "big"), PRIVATE_EXPONENT, MODULUS
-    ).to_bytes(size, "big")
+    signature = PRIVATE_KEY.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
     return f"{encoded_header}.{encoded_payload}.{_b64(signature)}"
 
 
@@ -159,7 +140,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print("Generating an ephemeral 2048-bit RSA key for local development...")
+    print(
+        f"Generated an ephemeral {PRIVATE_KEY.key_size}-bit RSA key "
+        f"for local development; tokens live {TOKEN_TTL_MINUTES} minutes."
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 9000), Handler)
     print(f"Local JWKS: {ISSUER}/.well-known/jwks.json")
     print("This issuer is for local development only; press Ctrl+C to stop.")

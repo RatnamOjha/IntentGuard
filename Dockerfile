@@ -1,4 +1,4 @@
-FROM openpolicyagent/opa:1.19.1-static AS opa
+FROM openpolicyagent/opa:1.20.2-static AS opa
 
 FROM python:3.11.16-slim-bookworm AS runtime
 

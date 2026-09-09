@@ -1,0 +1,70 @@
+PolicyEngine state-load growth curve
+====================================
+
+Date:        2026-09-02
+Environment: macOS-26.2-arm64-arm-64bit | arm64 | CPython 3.12.2
+Database:    PostgreSQL 15.15 (Homebrew), local unix socket
+Reproduce:   createdb <db> && apply migrations/0001-0005, then
+             INTENTGUARD_DATABASE_URL=postgresql:///<db> PYTHONPATH=src \
+               python scripts/measure-state-load-curve.py
+
+What is measured
+----------------
+PostgresStateRepository.load() reads six tables with no WHERE and no LIMIT,
+and PolicyEngine calls it at the top of every governed operation
+(policy_engine.py:740 for authorize_action, and 19 other call sites).
+
+Neither _authorizations nor _leases is ever removed from engine state -- there
+is no pop or delete for either -- so authorization_records and
+authorization_leases gain one row per request and are never pruned.
+
+Rows are seeded by duplicating the payloads of a genuine authorize call, so
+row widths are realistic rather than invented.
+
+Result
+------
+ rows/table   load() ms  authorize ms  audit events  audit/status ms
+--------------------------------------------------------------------
+          6         0.6           2.6            14              0.2
+        505        52.2          92.3            24              0.7
+      2,005       235.8         363.8            34              1.0
+      5,005       662.1        1012.2            43              0.9
+     10,005      1294.8        2136.9            48              1.2
+     20,005      2768.1        4111.2            78              1.0
+
+Median of 5 runs per cell. Growth is linear in accumulated history:
+roughly 0.138 ms per row for load(), 0.205 ms per row for a full authorize.
+
+For reference, docs quote 6.9 ms p50 / 13.6 ms p99 for an HTTP authorize.
+That figure holds only on an empty history.
+
+Where the time goes, at 20,005 rows
+-----------------------------------
+  raw SQL fetch of authorization_records :    681.4 ms
+  _decode() over those rows              :    596.6 ms
+  full load() across six tables          :   2551.0 ms
+  deepcopy(state) at the end of save()   :   1346.1 ms
+
+Cost is split roughly evenly between moving rows out of Postgres and
+rebuilding Python objects from them. An index or a VACUUM does not address
+either half. save() additionally deep-copies the whole state to refresh its
+diff baseline, which is why a full authorize costs about 1.5x a bare load().
+
+What this implies
+-----------------
+One agent sustaining one action per minute accumulates ~1,440 rows per day:
+
+  after 1 day   (~1,400 rows)   authorize ~  0.3 s
+  after 4 days  (~5,800 rows)   authorize ~  1.2 s
+  after 14 days (~20,000 rows)  authorize ~  4.1 s
+
+The degradation is on the critical path of the spend decision, so it surfaces
+as refund authorizations timing out rather than as a slow dashboard.
+
+Not measured here
+-----------------
+audit_events stayed under 100 rows because the seeding grew only
+authorization_records and authorization_leases. The flat audit/status column
+is therefore not evidence that GET /v1/audit/status scales -- that handler
+reads the full event list twice (once for `events`, once inside verify() ->
+first_invalid_link()) and was not exercised at volume.

@@ -1,0 +1,272 @@
+.page {
+  min-height: 100dvh;
+  background: var(--paper);
+}
+
+/* --- top bar ------------------------------------------------------------ */
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 28px;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.brand strong {
+  display: block;
+  font-size: 0.9375rem;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--paper);
+  display: grid;
+  place-items: center;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.tagline {
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+}
+.barRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pass);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pass) 18%, transparent);
+  animation: breathe 2.6s var(--ease) infinite;
+}
+.statusStop .statusDot,
+.statusOff .statusDot {
+  background: var(--stop);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--stop) 18%, transparent);
+}
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.stop,
+.resume {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--stop-line);
+  background: var(--card);
+  color: var(--stop);
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.stop:hover:not(:disabled) { background: var(--stop); color: #fff; }
+.resume { border-color: var(--pass-line); color: var(--pass); }
+.resume:hover:not(:disabled) { background: var(--pass); color: #fff; }
+.stop:disabled, .resume:disabled { opacity: 0.4; }
+
+/* --- notice ------------------------------------------------------------- */
+.notice {
+  margin: 14px auto 0;
+  max-width: 1120px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: var(--card);
+  border: 1px solid var(--line-firm);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 0.8125rem;
+  animation: slide var(--base) var(--ease) both;
+}
+.notice button {
+  border: none;
+  background: none;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--ink-faint);
+}
+@keyframes slide {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- layout ------------------------------------------------------------- */
+.main {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 34px 28px 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+.intro {
+  max-width: 62ch;
+  animation: rise var(--slow) var(--ease) both;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.h1 {
+  font-size: clamp(1.75rem, 3.4vw, 2.5rem);
+  font-weight: 650;
+  line-height: 1.14;
+  letter-spacing: -0.035em;
+}
+.h1 span { color: var(--stop); }
+.lede {
+  margin-top: 14px;
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: var(--ink-soft);
+}
+
+/* --- the console -------------------------------------------------------- */
+.console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: 26px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .console { grid-template-columns: 1fr; }
+}
+
+.stepLabel {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  margin-bottom: 13px;
+}
+.step {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+  display: grid;
+  place-items: center;
+  font-size: 0.6875rem;
+  letter-spacing: 0;
+}
+
+.run {
+  margin-top: 14px;
+  width: 100%;
+  padding: 13px 18px;
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  transition: transform var(--fast) var(--ease), opacity var(--fast) var(--ease);
+}
+.run:hover:not(:disabled) { transform: translateY(-1px); }
+.run:active:not(:disabled) { transform: translateY(0); }
+.run:disabled { opacity: 0.4; }
+
+.reset {
+  margin-top: 9px;
+  width: 100%;
+  padding: 7px;
+  border: none;
+  background: none;
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.reset:disabled { opacity: 0.4; }
+
+/* --- approvals ---------------------------------------------------------- */
+.approvals {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.approvals li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--hold-line);
+  background: var(--hold-wash);
+  border-radius: var(--r-md);
+}
+.approvals strong {
+  display: block;
+  font-size: 0.875rem;
+  text-transform: capitalize;
+}
+.approvalMeta {
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+}
+.approvalActions { display: flex; gap: 8px; flex: none; }
+.approve,
+.reject {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-firm);
+  background: var(--card);
+}
+.approve { border-color: var(--pass); color: var(--pass); }
+.approve:hover:not(:disabled) { background: var(--pass); color: #fff; }
+.reject { color: var(--ink-soft); }
+.reject:hover:not(:disabled) { border-color: var(--stop); color: var(--stop); }
+.approve:disabled, .reject:disabled { opacity: 0.45; }
+
+/* --- audit chip --------------------------------------------------------- */
+.chainOk,
+.chainBad {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+.chainOk { background: var(--pass-wash); color: var(--pass); }
+.chainBad { background: var(--stop-wash); color: var(--stop); }

@@ -1,0 +1,156 @@
+Counters and epochs across replicas: before and after
+=====================================================
+
+Date:        2026-09-02
+Environment: macOS-26.2-arm64-arm-64bit | arm64 | CPython 3.12.2
+Database:    PostgreSQL 15.15 (Homebrew), local unix socket
+Reproduce:   INTENTGUARD_DATABASE_URL=postgresql:///<db> PYTHONPATH=src \
+               python -m unittest tests.test_persistence.ConcurrentCounterTest
+
+"Before" was measured against the tree at ea6f188, reconstructed with
+`git show`, not against a description of it.
+
+Field inventory
+---------------
+Every numeric field in GovernanceState, where it lives, and what it is.
+
+1. authorization_counts[(agent_id, day)]      CATEGORY A: true counter
+   stored      authorization_counters.authorization_count
+   incremented policy_engine.py, _issue_authorization_unlocked
+   read        policy_engine.py, _derive_risk -- the velocity risk signal
+   merged by   GREATEST(existing, EXCLUDED), so concurrent increments
+               converged to the maximum rather than the sum.
+
+2. fleet_epoch                                 CATEGORY B: monotonic epoch
+   stored      governance_metadata.fleet_epoch
+   incremented policy_engine.py, stop_fleet
+   read        stamped on every lease; commit_reservation refuses a lease
+               whose stamped epoch differs from the current one
+   merged by   blind assignment of the writer's absolute value.
+   Safety-critical: a collapsed epoch lets a lease issued between two stops
+   survive the second stop, because its stamped epoch still matches.
+
+3. revocation_epochs[agent_id]                 CATEGORY B: monotonic epoch
+   stored      agent_revocations.revocation_epoch
+   incremented policy_engine.py, revoke_agent
+   read        NOWHERE. Persisted and never consulted by the engine.
+   merged by   blind assignment of the writer's absolute value.
+   Fixed for correctness; it has no behavioural effect until something reads
+   it, which is worth knowing before something does.
+
+4. policy_revision                             CATEGORY B: monotonic version
+   stored      governance_metadata.policy_revision
+   incremented policy_engine.py, update_agent_policy
+   read        composes policy_version, which is recorded on every decision
+   merged by   blind assignment of the writer's absolute value.
+   Two different policies sharing one version string cannot be told apart by
+   an auditor reading decisions later.
+
+Also present, and deliberately NOT given increment semantics:
+
+5. policy_version  CATEGORY C: derived string, follows policy_revision
+6. fleet_stopped   CATEGORY C: boolean; last writer wins, unchanged here
+
+BEFORE -- 8 concurrent processes, one increment each
+----------------------------------------------------
+    authorization_count : expected 8, observed 1
+    policy_revision     : expected 8, observed 1
+    revocation_epoch    : expected 8, observed 1
+    fleet_epoch         : 7 of 8 replicas raised
+                          "ValueError: Reservation is released, not held."
+
+The fleet result is a separate defect the test exposed. stop_fleet sweeps every
+held reservation and releases each one; two replicas sweeping at once race, and
+the loser's exception propagates BEFORE _persist_state_unlocked runs. The audit
+ledger has already recorded "fleet.stopped" by that point, so a concurrent
+double-stop can leave the audit trail asserting the fleet stopped while
+governance_metadata still says it is running. Whether the fleet actually stops
+depends on which replica wins each individual release.
+
+AFTER -- same test, same 8 processes
+------------------------------------
+    authorization_count : 8
+    policy_revision     : +8
+    revocation_epoch    : 8
+    fleet_epoch         : +8, no replica raised
+
+Policy behaviour, before vs after
+---------------------------------
+Wave 1 is 8 concurrent authorizations. Wave 2 is one further authorization,
+sequential. Agent daily budget 2,000; intent max 100; request amount 100.
+
+                                    BEFORE          AFTER
+  concurrent processes              8               8
+  wave 1 decisions                  ALLOW=8         ALLOW=8
+  wave 1 risk scores                all 36          all 36
+  counter after wave 1              1               8
+  wave 2 decision                   ALLOW           REVIEW
+  wave 2 effective risk             52              76
+  wave 2 velocity signal            prior=1         prior=8
+
+Wave 1 is identical, and that is the point: every replica reads the counter
+before any of them increments it, so the burst itself is scored the same. The
+fix does not gratuitously escalate anything.
+
+The divergence lands on the next request. Velocity contributes
+min(prior x 6, 30) points, so undercounting 8 prior authorizations as 1 removed
+24 points: 52 instead of 76, against a review threshold of 70. An agent that
+spread its requests across replicas stayed under the threshold; the same agent
+going serially crossed it.
+
+More REVIEW decisions is the correction, not a regression. The escalation
+control was under-firing for precisely the traffic pattern most worth
+escalating -- a burst spread across replicas.
+
+The fix
+-------
+StateRepository gains four single-statement operations, each reading and
+writing inside the database and returning the authoritative value:
+
+    increment_authorization_count(agent_id, day) -> int
+    next_fleet_epoch(policy_version=...)         -> int
+    next_revocation_epoch(agent_id)              -> int
+    next_policy_revision(version_prefix=...)     -> (int, str)
+
+Each is an INSERT ... ON CONFLICT DO UPDATE SET x = x + 1 ... RETURNING, so a
+missing row is created and an existing one is advanced without a read-modify-
+write in Python.
+
+next_policy_revision returns the version string as well, composed in SQL from
+the incremented revision, because the two are one fact. Bumping the number in
+the database while composing the string in Python lets a slower replica store a
+version that disagrees with the revision beside it.
+
+save() was also made non-regressing, which the atomic increments require:
+fleet_epoch now merges as max(current, desired), the revocation upsert uses
+GREATEST, and policy_revision/policy_version are written only when the revision
+increases, together. Without this a replica one snapshot behind would undo a
+peer's increment simply by saving last.
+
+stop_fleet and revoke_agent now sweep holds through _release_if_held_unlocked,
+which tolerates a reservation another replica already resolved. The hold is off
+the books either way, and whoever resolved it recorded its own audit event.
+
+Single-process semantics are unchanged: with no state repository there is one
+process by construction, and each helper falls back to the original in-memory
+increment under the engine lock.
+
+Test results
+------------
+    tests.test_persistence.ConcurrentCounterTest ... 4 tests, OK
+    full suite ................................... 250 tests, OK (skipped=7)
+    ruff format --check scripts .................. 3 files already formatted
+    ruff check --select E9,F63,F7,F82 ............ All checks passed
+    bandit -q -lll -r src scripts ................ clean
+    mypy (CI subset) ............................. Success, no issues
+
+No existing test required changing.
+
+Not covered
+-----------
+fleet_stopped remains a boolean with last-writer-wins semantics, so a stop
+racing a resume still resolves arbitrarily. That is a lost *state*, not a lost
+increment, and is out of scope here.
+
+Cross-ledger atomicity is unchanged: budget, state and audit remain separate
+transactions. ADR 005 Risk 3.

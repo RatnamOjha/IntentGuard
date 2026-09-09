@@ -97,12 +97,37 @@ class ActionRequest:
 
 
 @dataclass(frozen=True)
+class FindingContext:
+    """The engine-derived values behind a finding, typed rather than free text.
+
+    Only values the engine itself computed or read from policy belong here: a
+    ceiling from an agent policy or intent, the amount the engine measured
+    against it, or the set of actions a policy permits. Request-supplied text
+    is deliberately excluded -- it is attacker-controlled, and echoing it back
+    onto an operator's screen is the same mistake Decisions #5 avoided for the
+    audit ledger, which records the *names* of conflicting fields and not their
+    submitted values.
+    """
+
+    #: The ceiling the engine compared against, in the request's currency.
+    limit: Decimal | None = None
+    #: The value that breached ``limit``. Always engine-side, never echoed.
+    actual: Decimal | None = None
+    #: The actions this agent's policy permits. Unordered; sort for display.
+    permitted: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
 class PolicyFinding:
     """One policy observation supporting a decision."""
 
     code: str
     message: str
     blocking: bool
+    #: Present only for findings that compared a number or a permitted set.
+    #: ``None`` for the boolean and membership checks, which have no operands
+    #: worth showing.
+    context: FindingContext | None = None
 
 
 @dataclass(frozen=True)

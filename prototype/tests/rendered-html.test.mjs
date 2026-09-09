@@ -22,25 +22,39 @@ async function render() {
   );
 }
 
-test("server-renders the IntentGuard operator console", async () => {
+test("server-renders the IntentGuard console", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<title>IntentGuard \| Financial Agent Governance<\/title>/i);
-  assert.match(html, /Financial agent control room/);
-  assert.match(html, /Simulate an agent action/);
-  assert.match(html, /Stale lease after emergency stop/);
-  assert.match(html, /Permission and budget configuration/);
-  assert.match(html, /Measured evaluation evidence/);
-  assert.match(html, /Measured API round-trip p95/);
-  assert.match(html, /Running deterministic evidence suite/);
-  assert.doesNotMatch(html, /Measured gateway latency/);
-  assert.doesNotMatch(html, /LABELED ACCURACY/);
-  assert.match(html, /Production roadmap/i);
+
+  // The page states what the product does before asking for any interaction.
+  assert.match(html, /Your support agent can issue/);
+  assert.match(html, /It cannot issue the wrong ones/);
+
+  // Two numbered steps, so a first-time viewer knows where to start.
+  assert.match(html, /Choose a request/i);
+  assert.match(html, /Read the decision/i);
+
+  // Every scenario states its own expected outcome up front.
+  // React escapes the apostrophe, so match around it.
+  assert.match(html, /A refund above the agent&#x27;s limit/);
+  assert.match(html, /The billing agent tries to refund/);
+  assert.match(html, /A refund after the emergency stop/);
+
+  // The refusal is the hero, so the empty state must promise the explanation.
+  assert.match(html, /the exact rule that fired and the number that broke it/);
+
   assert.match(html, /Emergency stop/);
-  assert.match(html, /Live decisions/);
+  assert.match(html, /Every decision, in order/);
+
+  // Marketing panels that diluted the product demo are gone for good.
+  assert.doesNotMatch(html, /Production roadmap/i);
+  assert.doesNotMatch(html, /Implementation truth/i);
+  assert.doesNotMatch(html, /Measured evaluation evidence/i);
+
   assert.doesNotMatch(html, /Your site is taking shape/);
   assert.doesNotMatch(html, /react-loading-skeleton/);
 });

@@ -1,0 +1,46 @@
+.wrap {
+  margin: 14px 0 4px;
+}
+.row {
+  display: grid;
+  grid-template-columns: 74px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+.label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-faint);
+  text-align: right;
+}
+.track {
+  height: 8px;
+  background: var(--sunk);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.barAllowed,
+.barAsked {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  transform-origin: left center;
+  animation: grow var(--slow) var(--ease) both;
+}
+.barAllowed { background: var(--pass); }
+.barAsked   { background: var(--stop); animation-delay: 90ms; }
+
+@keyframes grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.over {
+  margin-left: 84px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--stop);
+  letter-spacing: 0.01em;
+}

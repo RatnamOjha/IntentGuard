@@ -1,0 +1,13 @@
+.money {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.sm { font-size: 0.8125rem; }
+.md { font-size: 0.9375rem; font-weight: 500; }
+.lg { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.025em; }
+.default { color: var(--ink); }
+.stop { color: var(--stop); }
+.pass { color: var(--pass); }
+.faint { color: var(--ink-faint); }
+.dash { color: var(--ink-faint); }

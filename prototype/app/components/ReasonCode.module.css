@@ -1,0 +1,12 @@
+.code {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+  border: 1px solid;
+}
+.stop { background: var(--stop-wash); color: var(--stop); border-color: var(--stop-line); }
+.hold { background: var(--hold-wash); color: var(--hold); border-color: var(--hold-line); }
+.soft { background: var(--sunk); color: var(--ink-soft); border-color: var(--line); }
