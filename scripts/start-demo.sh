@@ -10,8 +10,16 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo "pnpm is required. Install it with: npm install -g pnpm"
+# package.json pins pnpm@11.24.0, which is what CI installs with. Prefer
+# corepack so a different pnpm on PATH cannot produce a lockfile CI then
+# refuses -- exactly what happened when a local pnpm 10 relocked a tree CI
+# reads with pnpm 11.
+if command -v corepack >/dev/null 2>&1; then
+  PNPM=(corepack pnpm@11.24.0)
+elif command -v pnpm >/dev/null 2>&1; then
+  PNPM=(pnpm)
+else
+  echo "pnpm is required. Install Node 22+ (which ships corepack), or: npm install -g pnpm"
   exit 1
 fi
 
@@ -29,7 +37,7 @@ fi
 # everything already matches, so just run it.
 (
   cd "$FRONTEND_DIR"
-  pnpm install --frozen-lockfile
+  CI=true "${PNPM[@]}" install --frozen-lockfile
 )
 
 # The one-command demo uses an ephemeral issuer bound only to loopback. Run the
@@ -139,4 +147,4 @@ echo "Protected booking connector: http://127.0.0.1:8100"
 echo "IntentGuard console will use port 3000 or the next available local port."
 
 cd "$FRONTEND_DIR"
-pnpm run dev
+"${PNPM[@]}" run dev
