@@ -119,6 +119,10 @@ export default function Console() {
   const [approvals, setApprovals] = useState<ApiApproval[]>([]);
   const [feed, setFeed] = useState<FeedRow[]>([]);
   const [audit, setAudit] = useState<ApiAuditStatus | null>(null);
+  // Which evaluator decided. The built-in engine and Rego are deliberately
+  // not equivalent, so a chain that verifies does not by itself say what was
+  // enforced. Read from the record rather than inferred.
+  const [evaluator, setEvaluator] = useState<string | null>(null);
   const [fleetStopped, setFleetStopped] = useState(false);
   const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("overLimit");
   const [verdict, setVerdict] = useState<VerdictData | null>(null);
@@ -151,6 +155,14 @@ export default function Console() {
         .map((event) => toFeedRow(event, names))
         .filter((row): row is FeedRow => row !== null)
         .reverse(),
+    );
+    const decided = [...events]
+      .reverse()
+      .find((event) => event.event_type === "policy.evaluated");
+    setEvaluator(
+      typeof decided?.payload.policy_engine === "string"
+        ? decided.payload.policy_engine
+        : null,
     );
     setLink("live");
   }, []);
@@ -567,6 +579,9 @@ export default function Console() {
             audit ? (
               <span className={audit.verified ? styles.chainOk : styles.chainBad}>
                 {audit.verified ? "Chain verified" : "Chain broken"} · {audit.event_count} events
+                {evaluator
+                  ? ` · decided by ${evaluator === "opa_rego" ? "Rego" : "built-in"}`
+                  : ""}
               </span>
             ) : null
           }
