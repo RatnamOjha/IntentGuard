@@ -442,3 +442,126 @@ class AgentEndpointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimOverHttpTest(unittest.TestCase):
+    """The claim has to survive the HTTP boundary, and be refused if malformed."""
+
+    def setUp(self) -> None:
+        from intentguard.api import create_app
+
+        self.client = TestClient(
+            create_app(PolicyEngine(), authenticator=test_authenticator())
+        )
+        # The token names the one agent it may act for, so it has to name Ada.
+        self.client.headers.update(admin_headers(agent_id="ada"))
+        self.now = datetime.now(timezone.utc)
+        self.client.post(
+            "/v1/agents",
+            json={
+                "agent_id": "ada",
+                "name": "Ada",
+                "allowed_actions": ["refund_order"],
+                "max_action_amount": "5000",
+                "daily_budget": "50000",
+            },
+        )
+        self.client.post(
+            "/v1/intents",
+            json={
+                "intent_id": "intent-refund",
+                "customer_id": "customer-01",
+                "agent_id": "ada",
+                "action": "refund_order",
+                "max_amount": "5000",
+                "currency": "INR",
+                "expires_at": (self.now + timedelta(hours=1)).isoformat(),
+            },
+        )
+
+    def action(self, request_id: str, claim: dict | None) -> dict:
+        body: dict = {
+            "request_id": request_id,
+            "agent_id": "ada",
+            "action": "refund_order",
+            "amount": "4200",
+            "currency": "INR",
+            "intent_id": "intent-refund",
+            "risk_score": 10,
+        }
+        if claim is not None:
+            body["claim"] = claim
+        return body
+
+    def post(self, request_id: str, claim: dict | None):
+        return self.client.post(
+            "/v1/actions/authorize", json=self.action(request_id, claim)
+        )
+
+    def test_a_claim_with_evidence_earns_the_full_refund(self) -> None:
+        response = self.post(
+            "claim-ok",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "evidence": ["photo"],
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        decision = response.json()["decision"]
+        self.assertEqual("allow", decision["decision"])
+        self.assertEqual("refund_to_source", decision["remedy"]["kind"])
+
+    def test_the_same_claim_without_evidence_is_refused_with_the_alternative(
+        self,
+    ) -> None:
+        """The refusal has to carry what would have passed, or it teaches nothing."""
+
+        response = self.post(
+            "claim-bare",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "evidence": [],
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        decision = response.json()["decision"]
+        self.assertEqual("deny", decision["decision"])
+        self.assertIn(
+            "REMEDY_NOT_PERMITTED",
+            [finding["code"] for finding in decision["findings"]],
+        )
+        self.assertEqual("shipping_refund", decision["remedy"]["kind"])
+
+    def test_an_unknown_reason_is_rejected_rather_than_interpreted(self) -> None:
+        response = self.post(
+            "claim-bogus",
+            {
+                "reason": "because_i_said_so",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+            },
+        )
+        self.assertEqual(422, response.status_code)
+
+    def test_an_unexpected_claim_field_is_rejected_rather_than_ignored(self) -> None:
+        """A misspelled constraint that is silently dropped is worse than an error."""
+
+        response = self.post(
+            "claim-extra",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "evidenec": ["photo"],
+            },
+        )
+        self.assertEqual(422, response.status_code)
+
+    def test_omitting_the_claim_keeps_the_previous_behaviour(self) -> None:
+        response = self.post("claim-none", None)
+        self.assertEqual(200, response.status_code)
+        self.assertIsNone(response.json()["decision"]["remedy"])

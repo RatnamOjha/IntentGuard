@@ -70,6 +70,71 @@ class IntentPassport:
         return now >= self.expires_at
 
 
+class ClaimReason(str, Enum):
+    """Why the customer says the order went wrong.
+
+    Closed set on purpose. A free-text reason would be attacker-controlled
+    text reaching policy and an operator's screen, which is the mistake
+    Decisions #5 avoided for the ledger and `FindingContext` avoided for
+    findings.
+    """
+
+    DEFECT = "defect"
+    NOT_DELIVERED = "not_delivered"
+    LATE = "late"
+    CHANGED_MIND = "changed_mind"
+
+
+class RemedyKind(str, Enum):
+    """How a claim may be settled, if at all."""
+
+    REFUND_TO_SOURCE = "refund_to_source"
+    STORE_CREDIT = "store_credit"
+    SHIPPING_REFUND = "shipping_refund"
+    RESCHEDULE = "reschedule"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class RefundClaim:
+    """What the agent asserts about the complaint behind this action.
+
+    **Every field here is an agent assertion, not a verified fact.** The
+    gateway has no way to confirm a photo exists or that delivery was late;
+    in a real deployment those come from the merchant's order system, and
+    the honest description of this structure is "what the agent says".
+
+    That is safe only because of one rule the engine enforces: *a claim may
+    narrow the remedy, never widen it*. The permitted amount is always capped
+    by the agent's own per-action limit and the customer's intent, so an agent
+    that lies about the claim can at most reach what it was already authorised
+    for. Evidence buys a better remedy **within** existing authority; it can
+    never buy more authority. Break that rule and the claim becomes a
+    self-service permission escalation.
+    """
+
+    reason: ClaimReason
+    #: What the order was worth. Bounds a full refund.
+    order_value: Decimal
+    days_since_delivery: int
+    #: Supporting material the agent says exists, e.g. "photo", "courier_scan".
+    evidence: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class Remedy:
+    """The settlement policy permits for a claim -- an envelope, not an order.
+
+    The agent chooses what to propose; policy says what may be honoured. When
+    the two disagree the proposal is refused and this says what would have
+    passed instead.
+    """
+
+    kind: RemedyKind
+    #: Ceiling in the request's currency. Zero means "nothing is permitted".
+    cap: Decimal
+
+
 @dataclass(frozen=True)
 class ActionRequest:
     """An action proposed by an agent and intercepted before execution."""
@@ -91,6 +156,9 @@ class ActionRequest:
     # Verified token subject that submitted the action. The policy engine uses
     # this for separation of duties when a request reaches human review.
     submitted_by: str | None = None
+    # What the agent says the complaint is. Optional so every existing caller
+    # keeps working; when absent the engine applies no claim-based rules.
+    claim: RefundClaim | None = None
     occurred_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -162,6 +230,9 @@ class DecisionRecord:
     remaining_daily_budget: Decimal
     policy_version: str
     risk: RiskAssessment | None = None
+    #: What policy would permit for this claim. Present only when the request
+    #: carried one. On a refusal this is the "what would have passed" answer.
+    remedy: Remedy | None = None
 
     @property
     def explanation(self) -> str:

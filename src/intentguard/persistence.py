@@ -21,12 +21,16 @@ from .models import (
     ApprovalStatus,
     AuthorizationLease,
     AuthorizationResult,
+    ClaimReason,
     Decision,
     DecisionRecord,
     FindingContext,
     HumanApproval,
     IntentPassport,
     PolicyFinding,
+    RefundClaim,
+    Remedy,
+    RemedyKind,
     ReservationStatus,
     RiskAssessment,
     BudgetReservation,
@@ -301,6 +305,8 @@ _DATACLASSES = {
         AgentProfile,
         IntentPassport,
         ActionRequest,
+        RefundClaim,
+        Remedy,
         FindingContext,
         PolicyFinding,
         RiskAssessment,
@@ -313,7 +319,13 @@ _DATACLASSES = {
 }
 _ENUMS = {
     item.__name__: item
-    for item in (Decision, ReservationStatus, ApprovalStatus)
+    for item in (
+        Decision,
+        ReservationStatus,
+        ApprovalStatus,
+        ClaimReason,
+        RemedyKind,
+    )
 }
 
 
