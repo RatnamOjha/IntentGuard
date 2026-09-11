@@ -26,7 +26,103 @@ from tests.jwt_test_support import AUDIENCE, ISSUER, JWKS, bearer
 
 
 OPA = find_opa_executable()
+
+# CI installs OPA, so a skip there means the binary was installed and never
+# found -- which is how a broken lookup once let CI report green while every
+# test of the policy engine was skipped. With this set, not finding OPA is a
+# failure rather than a quiet skip. Contributors without OPA still skip.
+REQUIRE_OPA = os.getenv("INTENTGUARD_REQUIRE_OPA_TESTS") == "1"
+
+
+class OpaAvailabilityTest(unittest.TestCase):
+    """Guards the guard: a skipped Rego suite must not look like a pass."""
+
+    def test_opa_is_discoverable_where_it_is_required(self) -> None:
+        if not REQUIRE_OPA:
+            self.skipTest(
+                "Set INTENTGUARD_REQUIRE_OPA_TESTS=1 to require a discoverable OPA"
+            )
+        self.assertIsNotNone(
+            OPA,
+            "INTENTGUARD_REQUIRE_OPA_TESTS=1 but find_opa_executable() returned "
+            "None, so every Rego test below skipped. An installed-but-unfound "
+            "policy engine is the failure this flag exists to make visible.",
+        )
+
+
 NOW = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
+
+
+def _decision_engine_field(engine: "PolicyEngine", request: "ActionRequest") -> str:
+    """The ``policy_engine`` recorded on the audit event for one decision."""
+
+    engine.evaluate(request, now=NOW)
+    evaluated = [
+        event
+        for event in engine.audit_ledger.events
+        if event.event_type == "policy.evaluated"
+    ]
+    return evaluated[-1].payload["policy_engine"]
+
+
+class AuditNamesTheEvaluatorTest(unittest.TestCase):
+    """Every decision records which evaluator produced it.
+
+    The Rego path always did; the built-in path recorded nothing, so the
+    engine behind a decision could be inferred but not read. The two are not
+    equivalent, which makes this the first field an investigator would want
+    if they ever disagreed in production.
+    """
+
+    def _engine(self, evaluator: object | None) -> "PolicyEngine":
+        engine = PolicyEngine(policy_evaluator=evaluator, review_risk_threshold=70)
+        engine.register_agent(
+            AgentProfile(
+                "travel-01", "Travel", frozenset({"book_hotel"}),
+                Decimal("20000"), Decimal("30000"),
+            )
+        )
+        engine.register_intent(
+            IntentPassport(
+                "intent-01", "customer-01", "travel-01", "book_hotel",
+                Decimal("18000"), "INR", NOW + timedelta(hours=1),
+            )
+        )
+        return engine
+
+    def _request(self) -> "ActionRequest":
+        return ActionRequest(
+            "audit-1", "travel-01", "book_hotel", Decimal("4500"), "INR",
+            "intent-01", 10, {"refundable": True}, "customer-01", occurred_at=NOW,
+        )
+
+    def test_the_builtin_evaluator_names_itself(self) -> None:
+        self.assertEqual(
+            "builtin",
+            _decision_engine_field(self._engine(None), self._request()),
+        )
+
+    @unittest.skipUnless(OPA, "OPA CLI is unavailable")
+    def test_the_rego_evaluator_names_itself(self) -> None:
+        evaluator = OpaCliPolicyEvaluator(
+            OPA, InMemoryPolicyRepository(initial_policy())
+        )
+        self.assertEqual(
+            "opa_rego",
+            _decision_engine_field(self._engine(evaluator), self._request()),
+        )
+
+    @unittest.skipUnless(OPA, "OPA CLI is unavailable")
+    def test_the_two_evaluators_are_distinguishable_in_the_record(self) -> None:
+        """Recording a constant would satisfy both tests above but not this."""
+
+        evaluator = OpaCliPolicyEvaluator(
+            OPA, InMemoryPolicyRepository(initial_policy())
+        )
+        self.assertNotEqual(
+            _decision_engine_field(self._engine(None), self._request()),
+            _decision_engine_field(self._engine(evaluator), self._request()),
+        )
 
 
 def policy_input(**request_changes: object) -> dict:

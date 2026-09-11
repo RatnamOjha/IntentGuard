@@ -133,3 +133,58 @@ class ImportPurityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PolicyEngineResolutionTest(unittest.TestCase):
+    """Choosing an evaluator must be a decision, never a path lookup.
+
+    The built-in evaluator is deliberately not equivalent to Rego, and it is
+    the more permissive of the two. Before this resolver existed, a missed
+    binary lookup silently substituted it -- so dev, demo and CI enforced a
+    weaker policy than the container did, and nothing said so.
+    """
+
+    def resolve(
+        self, mode: str | None, opa: str | None, database_url: str | None
+    ) -> str | None:
+        from intentguard.api import resolve_policy_engine
+
+        environment = {} if mode is None else {"INTENTGUARD_POLICY_ENGINE": mode}
+        with patch.dict(os.environ, environment, clear=False):
+            if mode is None:
+                os.environ.pop("INTENTGUARD_POLICY_ENGINE", None)
+            return resolve_policy_engine(opa, database_url=database_url)
+
+    def test_auto_prefers_rego_when_the_binary_is_there(self) -> None:
+        self.assertEqual("/opa", self.resolve(None, "/opa", None))
+
+    def test_auto_falls_back_only_where_a_fallback_is_obviously_safe(self) -> None:
+        """No database means a scratch demo, where zero-dependency boot wins."""
+
+        self.assertIsNone(self.resolve(None, None, None))
+
+    def test_auto_refuses_to_downgrade_once_a_database_is_configured(self) -> None:
+        """The regression this whole change exists to prevent."""
+
+        from intentguard.api import PolicyEngineMisconfigured
+
+        with self.assertRaises(PolicyEngineMisconfigured) as caught:
+            self.resolve(None, None, "postgresql:///intentguard")
+        self.assertIn("must not be", str(caught.exception))
+
+    def test_builtin_is_honoured_when_asked_for_explicitly(self) -> None:
+        """Downgrading is allowed. Doing it by accident is not."""
+
+        self.assertIsNone(self.resolve("builtin", "/opa", "postgresql:///x"))
+
+    def test_opa_mode_refuses_to_start_without_a_binary(self) -> None:
+        from intentguard.api import PolicyEngineMisconfigured
+
+        with self.assertRaises(PolicyEngineMisconfigured):
+            self.resolve("opa", None, None)
+
+    def test_an_unknown_mode_is_refused_rather_than_guessed(self) -> None:
+        from intentguard.api import PolicyEngineMisconfigured
+
+        with self.assertRaises(PolicyEngineMisconfigured):
+            self.resolve("sqlite", "/opa", None)

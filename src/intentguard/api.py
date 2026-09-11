@@ -85,6 +85,63 @@ def configured_cors_origins() -> tuple[str, ...]:
     return tuple(origin.strip() for origin in configured.split(",") if origin.strip())
 
 
+POLICY_ENGINE_MODES = ("auto", "opa", "builtin")
+
+
+class PolicyEngineMisconfigured(RuntimeError):
+    """The requested policy engine cannot be provided as asked."""
+
+
+def resolve_policy_engine(
+    opa_executable: str | None, *, database_url: str | None
+) -> str | None:
+    """Decide which evaluator to run, and refuse to downgrade by accident.
+
+    The built-in evaluator is not equivalent to Rego and is not meant to be:
+    once policies are customer-editable Rego, no Python reimplementation can
+    be. What it must never be is *more permissive*, and until this function
+    existed the choice between them was made by a path lookup. A missing
+    binary silently swapped the strict evaluator for the loose one, in the
+    environment least likely to notice.
+
+    ``INTENTGUARD_POLICY_ENGINE``:
+
+    * ``opa`` -- require Rego. Refuse to start without it.
+    * ``builtin`` -- run the built-in evaluator, deliberately.
+    * ``auto`` (default) -- prefer Rego; fall back only where a fallback is
+      obviously safe. A configured database means this is not a scratch demo,
+      so ``auto`` refuses rather than downgrading. Say ``builtin`` to accept.
+    """
+
+    setting = os.getenv("INTENTGUARD_POLICY_ENGINE", "auto").strip().lower()
+    if setting not in POLICY_ENGINE_MODES:
+        raise PolicyEngineMisconfigured(
+            f"INTENTGUARD_POLICY_ENGINE={setting!r} is not one of "
+            f"{', '.join(POLICY_ENGINE_MODES)}."
+        )
+    if setting == "builtin":
+        return None
+    if setting == "opa":
+        if not opa_executable:
+            raise PolicyEngineMisconfigured(
+                "INTENTGUARD_POLICY_ENGINE=opa, but no OPA binary was found. "
+                "Install it with scripts/install-opa.sh, put it on PATH, or "
+                "point INTENTGUARD_OPA_EXECUTABLE at it."
+            )
+        return opa_executable
+    if opa_executable:
+        return opa_executable
+    if database_url:
+        raise PolicyEngineMisconfigured(
+            "No OPA binary was found, but INTENTGUARD_DATABASE_URL is set, so "
+            "this looks like a deployment rather than a demo. The built-in "
+            "evaluator is not equivalent to the Rego policy and must not be "
+            "substituted silently. Install OPA, or set "
+            "INTENTGUARD_POLICY_ENGINE=builtin to accept it deliberately."
+        )
+    return None
+
+
 def configured_engine(limits: AbuseLimits | None = None) -> PolicyEngine:
     """Use PostgreSQL for every durable backend when a database URL is set."""
 
@@ -111,7 +168,9 @@ def configured_engine(limits: AbuseLimits | None = None) -> PolicyEngine:
     lease_audience = os.getenv(
         "INTENTGUARD_LEASE_AUDIENCE", "intentguard-booking-connector"
     )
-    opa_executable = find_opa_executable()
+    opa_executable = resolve_policy_engine(
+        find_opa_executable(), database_url=database_url
+    )
     policy_evaluator = None
     if opa_executable:
         policy_repository = (
@@ -517,6 +576,12 @@ def create_app(
             "database": "postgres" if database_url else "memory",
             "rate_limiter": "redis" if os.getenv("INTENTGUARD_REDIS_URL") else "memory",
             "policy": "opa" if engine.policy_evaluator is not None else "builtin",
+            # The mode that was asked for, beside the engine actually running.
+            # These agreeing is the point: "builtin" can no longer happen by
+            # accident, only by configuration or on the no-database dev path.
+            "policy_engine_mode": os.getenv(
+                "INTENTGUARD_POLICY_ENGINE", "auto"
+            ).strip().lower(),
         }
 
     def governance_engine() -> PolicyEngine:
