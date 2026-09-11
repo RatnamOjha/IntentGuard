@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .agent import GovernedAgent, build_planner
 from .abuse import (
@@ -51,7 +51,13 @@ from .execution_lease import (
     decode_lease_private_key,
 )
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from .models import ActionRequest, AgentProfile, IntentPassport
+from .models import (
+    ActionRequest,
+    AgentProfile,
+    ClaimReason,
+    IntentPassport,
+    RefundClaim,
+)
 from .observability import install_observability, observation_fields, operation_span
 from .policy_engine import PolicyEngine
 from .persistence import PostgresStateRepository
@@ -272,6 +278,23 @@ class AgentPolicyUpdate(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class ClaimPayload(BaseModel):
+    """The complaint behind a proposed action, as the agent describes it.
+
+    Closed enums rather than free text: a reason that reached policy as an
+    arbitrary string would be attacker-controlled input steering a decision,
+    and `extra="forbid"` means a misspelled field is a 422 rather than a
+    silently ignored constraint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: ClaimReason
+    order_value: Decimal = Field(gt=0)
+    days_since_delivery: int = Field(ge=0, le=3650)
+    evidence: set[str] = Field(default_factory=set, max_length=16)
+
+
 class ActionAuthorize(BaseModel):
     request_id: str
     agent_id: str
@@ -283,6 +306,7 @@ class ActionAuthorize(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     customer_id: str | None = Field(default=None, min_length=1, max_length=100)
     occurred_at: datetime | None = None
+    claim: ClaimPayload | None = None
 
 
 class ReservationCommit(BaseModel):
@@ -1001,6 +1025,16 @@ def create_app(
             customer_id=customer_id,
             submitted_by=principal.subject,
             occurred_at=occurred_at,
+            claim=(
+                RefundClaim(
+                    reason=payload.claim.reason,
+                    order_value=payload.claim.order_value,
+                    days_since_delivery=payload.claim.days_since_delivery,
+                    evidence=frozenset(payload.claim.evidence),
+                )
+                if payload.claim is not None
+                else None
+            ),
         )
         observation_fields(
             agent_id=agent_id,
