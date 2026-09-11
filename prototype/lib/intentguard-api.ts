@@ -33,6 +33,7 @@ export type ApiAuthorization = {
     remaining_daily_budget: string;
     policy_version: string;
     risk: ApiRiskAssessment | null;
+    remedy: ApiRemedy | null;
   };
   reservation: {
     reservation_id: string;
@@ -162,6 +163,37 @@ export type ApiAgentTurn = {
   authorization: ApiAuthorization | null;
 };
 
+export type ApiEvidenceKind = "photo" | "receipt" | "courier_scan";
+
+/** A citation into the merchant's systems, never bytes the gateway serves. */
+export type ApiEvidenceArtifact = {
+  kind: ApiEvidenceKind;
+  reference: string;
+};
+
+export type ApiClaimReason =
+  | "defect"
+  | "not_delivered"
+  | "late"
+  | "changed_mind";
+
+export type ApiClaim = {
+  reason: ApiClaimReason;
+  order_value: string;
+  days_since_delivery: number;
+  order_reference: string | null;
+  artifacts: ApiEvidenceArtifact[];
+  /** The customer's own words. Untrusted: render as a quotation, never as
+   *  chrome, and never with dangerouslySetInnerHTML. */
+  complaint: string | null;
+};
+
+/** What policy will honour -- an envelope, not an instruction. */
+export type ApiRemedy = {
+  kind: "refund_to_source" | "store_credit" | "shipping_refund" | "reschedule" | "none";
+  cap: string | number;
+};
+
 export type ActionPayload = {
   request_id: string;
   agent_id: string;
@@ -171,6 +203,14 @@ export type ActionPayload = {
   intent_id: string;
   risk_score: number;
   attributes: Record<string, unknown>;
+  claim?: {
+    reason: ApiClaimReason;
+    order_value: string;
+    days_since_delivery: number;
+    order_reference?: string;
+    artifacts?: ApiEvidenceArtifact[];
+    complaint?: string;
+  };
 };
 
 /** The seeded demo customer. The gateway takes the real one from the token

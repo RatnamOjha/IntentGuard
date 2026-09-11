@@ -27,6 +27,7 @@ import {
 } from "@/lib/intentguard-api";
 
 import { AgentChat, type ChatLine } from "./components/AgentChat";
+import { CaseFile, type CaseFileData } from "./components/CaseFile";
 import { AgentRoster } from "./components/AgentRoster";
 import { DecisionFeed, type FeedRow } from "./components/DecisionFeed";
 import { Money } from "./components/Money";
@@ -137,6 +138,30 @@ export default function Console() {
 
   const pending = approvals.filter((approval) => approval.status === "pending");
 
+  // Demo fixtures. A real deployment cites references into the merchant's
+  // order system and links out; the gateway stores no images, so there is
+  // nothing for it to serve.
+  const selected = scenarios[scenarioKey];
+  const caseFile: CaseFileData | null =
+    "claim" in selected && selected.claim
+      ? {
+          orderReference: selected.claim.order_reference,
+          reason: selected.claim.reason,
+          orderValue: selected.claim.order_value,
+          daysSinceDelivery: selected.claim.days_since_delivery,
+          artifacts: [...selected.claim.artifacts],
+          complaint: selected.claim.complaint,
+          previews: Object.fromEntries(
+            selected.claim.artifacts
+              .filter((artifact) => artifact.kind === "photo")
+              .map((artifact) => [
+                artifact.reference,
+                "/demo/damaged-parcel.svg",
+              ]),
+          ),
+        }
+      : null;
+
   const refresh = useCallback(async () => {
     const [nextAgents, fleet, nextApprovals, events, status] = await Promise.all([
       getAgents(),
@@ -200,6 +225,9 @@ export default function Console() {
       intent_id: scenario.intentId,
       risk_score: scenario.riskScore,
       attributes: { ...scenario.attributes },
+      ...("claim" in scenario && scenario.claim
+        ? { claim: { ...scenario.claim, artifacts: [...scenario.claim.artifacts] } }
+        : {}),
     };
     setBusy(true);
     const startedAt = performance.now();
@@ -236,6 +264,7 @@ export default function Console() {
           latencyMs: performance.now() - startedAt,
           remainingBudget: Number(authorization.decision.remaining_daily_budget),
           leaseId: null,
+          remedy: null,
         });
         await setFleetStop(false);
         restoreFleetAfter = false;
@@ -255,6 +284,7 @@ export default function Console() {
         latencyMs: performance.now() - startedAt,
         remainingBudget: Number(authorization.decision.remaining_daily_budget),
         leaseId: authorization.lease?.lease_id ?? null,
+        remedy: authorization.decision.remedy,
       });
       await refresh();
     } catch (error) {
@@ -307,6 +337,7 @@ export default function Console() {
             turn.authorization.decision.remaining_daily_budget,
           ),
           leaseId: turn.authorization.lease?.lease_id ?? null,
+          remedy: turn.authorization.decision.remedy,
         });
       }
       await refresh();
@@ -525,6 +556,8 @@ export default function Console() {
             />
           </div>
         </section>
+
+        {caseFile ? <CaseFile data={caseFile} /> : null}
 
         {pending.length > 0 ? (
           <Panel

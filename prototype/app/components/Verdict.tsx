@@ -1,6 +1,6 @@
 "use client";
 
-import type { ApiFinding } from "@/lib/intentguard-api";
+import type { ApiFinding, ApiRemedy } from "@/lib/intentguard-api";
 import { explain } from "../lib/explain";
 import { Breach } from "./Breach";
 import { Money } from "./Money";
@@ -18,6 +18,16 @@ export type VerdictData = {
   latencyMs: number;
   remainingBudget: number;
   leaseId: string | null;
+  /** What policy will honour for the claim. Present only when one was sent. */
+  remedy: ApiRemedy | null;
+};
+
+const REMEDY_LABEL: Record<ApiRemedy["kind"], string> = {
+  refund_to_source: "Refund to the original payment method",
+  store_credit: "Credit on the next order",
+  shipping_refund: "Refund the shipping only",
+  reschedule: "Reschedule the service",
+  none: "No remedy",
 };
 
 const HEADING: Record<VerdictOutcome, string> = {
@@ -123,6 +133,26 @@ export function Verdict({
               {reading.amend.label}
               <span aria-hidden="true"> →</span>
             </button>
+          ) : null}
+        </section>
+      ) : null}
+
+      {data.remedy ? (
+        <section
+          className={
+            data.outcome === "Allowed" ? styles.remedyOk : styles.remedy
+          }
+        >
+          <span className={styles.remedyLabel}>
+            {data.outcome === "Allowed"
+              ? "Policy honours this"
+              : "What policy would honour"}
+          </span>
+          <p className={styles.remedyKind}>{REMEDY_LABEL[data.remedy.kind]}</p>
+          {data.remedy.kind !== "none" ? (
+            <p className={styles.remedyCap}>
+              up to <strong>₹{data.remedy.cap}</strong>
+            </p>
           ) : null}
         </section>
       ) : null}
