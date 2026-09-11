@@ -24,12 +24,16 @@ from .models import (
     AuthorizationLease,
     AuthorizationResult,
     BudgetReservation,
+    ClaimReason,
     Decision,
     DecisionRecord,
     FindingContext,
     HumanApproval,
     IntentPassport,
     PolicyFinding,
+    RefundClaim,
+    Remedy,
+    RemedyKind,
     ReservationStatus,
     RiskAssessment,
 )
@@ -37,6 +41,51 @@ from .intent import IntentVerifier
 from .execution_lease import ExecutionLeaseSigner
 from .persistence import GovernanceState, StateRepository
 from .policy import PolicyEvaluator
+
+
+#: Which remedy an action pays out with. An action that is not here settles
+#: nothing, so a claim attached to one can never match and is refused -- the
+#: fail-closed direction, matching `default proposed_remedy := "none"` in Rego.
+_REMEDY_FOR_ACTION = {
+    "refund_order": RemedyKind.REFUND_TO_SOURCE,
+    "issue_goodwill_credit": RemedyKind.STORE_CREDIT,
+    "refund_shipping": RemedyKind.SHIPPING_REFUND,
+    "reschedule_service": RemedyKind.RESCHEDULE,
+}
+
+
+def _policy_remedy(
+    claim: RefundClaim,
+    *,
+    shipping_refund_cap: Decimal,
+    change_of_mind_days: int,
+) -> Remedy | None:
+    """What policy will honour for a claim, before any ceiling is applied.
+
+    This mirrors the `policy_remedy` rules in authorization.rego. Two
+    implementations of one policy is the arrangement Decisions I settled on:
+    they are not required to be equivalent, only to keep the built-in one from
+    ever being the *more permissive* of the two. PermissivenessInvariantTest
+    is what holds that.
+
+    ``None`` means no rule matched, which is refused rather than allowed.
+    """
+
+    if claim.reason is ClaimReason.DEFECT:
+        if "photo" in claim.evidence:
+            return Remedy(RemedyKind.REFUND_TO_SOURCE, claim.order_value)
+        return Remedy(RemedyKind.SHIPPING_REFUND, shipping_refund_cap)
+    if claim.reason is ClaimReason.NOT_DELIVERED:
+        if "courier_scan" in claim.evidence:
+            return Remedy(RemedyKind.REFUND_TO_SOURCE, claim.order_value)
+        return Remedy(RemedyKind.STORE_CREDIT, claim.order_value)
+    if claim.reason is ClaimReason.LATE:
+        return Remedy(RemedyKind.SHIPPING_REFUND, shipping_refund_cap)
+    if claim.reason is ClaimReason.CHANGED_MIND:
+        if claim.days_since_delivery <= change_of_mind_days:
+            return Remedy(RemedyKind.STORE_CREDIT, claim.order_value)
+        return Remedy(RemedyKind.NONE, Decimal("0"))
+    return None
 
 
 class PolicyEngine:
@@ -60,6 +109,18 @@ class PolicyEngine:
         *,
         policy_version: str = "2026.07",
         review_risk_threshold: int = 70,
+        # Payout thresholds. Per-company policy lives in Rego; these are the
+        # defaults every organisation starts from until it edits its own.
+        # None means "no payout threshold configured". An absolute figure
+        # baked into the engine would mean different things in different
+        # currencies and different things to different companies, and shipping
+        # one silently would change every existing deployment's outcomes. It is
+        # live wherever it is set -- which is the demo and its tests -- rather
+        # than dead as its travel-era predecessor was.
+        large_payout_threshold: Decimal | None = None,
+        shipping_refund_cap: Decimal = Decimal("150"),
+        change_of_mind_days: int = 7,
+        review_merchant_categories: frozenset[str] = frozenset({"cash_equivalent"}),
         audit_ledger: AuditLedger | None = None,
         budget_ledger: BudgetLedger | None = None,
         state_repository: StateRepository | None = None,
@@ -74,6 +135,10 @@ class PolicyEngine:
         self.policy_version = policy_version
         self._policy_revision = 0
         self.review_risk_threshold = review_risk_threshold
+        self.large_payout_threshold = large_payout_threshold
+        self.shipping_refund_cap = shipping_refund_cap
+        self.change_of_mind_days = change_of_mind_days
+        self.review_merchant_categories = review_merchant_categories
         self.audit_ledger = audit_ledger or AuditLedger()
         self._agents: dict[str, AgentProfile] = {}
         self._intents: dict[str, IntentPassport] = {}
@@ -557,6 +622,8 @@ class PolicyEngine:
             )
             self._check_required_attributes(findings, intent, request)
 
+        remedy = self._check_claim(findings, request, agent, intent)
+
         spent_today = Decimal("0")
         if agent is not None:
             exposure = self.budget_ledger.exposure(
@@ -610,17 +677,38 @@ class PolicyEngine:
             )
 
         blocking_findings = [item for item in findings if item.blocking]
+        # Rego reviews on three grounds; this engine used to review on one, so
+        # it was the more permissive of the two for a large payout or a flagged
+        # merchant category -- the exact direction Decisions I forbids. The
+        # other two grounds are mirrored here so the invariant actually holds
+        # rather than being carried as an accepted divergence.
+        review_reason = None
+        if risk.effective >= self.review_risk_threshold:
+            review_reason = (
+                "its effective risk score of "
+                f"{risk.effective} meets the configured threshold"
+            )
+        elif (
+            self.large_payout_threshold is not None
+            and request.amount >= self.large_payout_threshold
+        ):
+            review_reason = "the payout is large enough to need a person"
+        elif (
+            request.attributes.get("merchant_category")
+            in self.review_merchant_categories
+        ):
+            review_reason = "the merchant category is flagged for review"
+
         if blocking_findings:
             decision = Decision.DENY
-        elif risk.effective >= self.review_risk_threshold:
+        elif review_reason is not None:
             decision = Decision.REVIEW
             findings.append(
                 PolicyFinding(
                     code="HUMAN_APPROVAL_REQUIRED",
                     message=(
-                        "The action requires human approval because its "
-                        f"effective risk score of {risk.effective} meets the "
-                        "configured threshold."
+                        "The action requires human approval because "
+                        f"{review_reason}."
                     ),
                     blocking=False,
                 )
@@ -642,6 +730,7 @@ class PolicyEngine:
             remaining_daily_budget=remaining_budget,
             policy_version=self.policy_version,
             risk=risk,
+            remedy=remedy,
         )
         self.audit_ledger.append(
             "policy.evaluated",
@@ -656,6 +745,8 @@ class PolicyEngine:
                 # is part of the record -- and the first field an investigator
                 # would want if they ever disagreed in production.
                 "policy_engine": "builtin",
+                "remedy_kind": remedy.kind.value if remedy else None,
+                "remedy_cap": str(remedy.cap) if remedy else None,
                 "declared_risk": risk.declared,
                 "derived_risk": risk.derived,
                 "effective_risk": risk.effective,
@@ -731,13 +822,34 @@ class PolicyEngine:
                     risk.declared < self.review_risk_threshold <= risk.derived
                 ),
             },
+            # What the agent says the complaint is. Untrusted -- see RefundClaim
+            # -- which is why the rules let a claim narrow the remedy and never
+            # widen it past the ceilings above.
+            "claim": {
+                "known": request.claim is not None,
+                "reason": request.claim.reason.value if request.claim else None,
+                "order_value": (
+                    float(request.claim.order_value) if request.claim else 0
+                ),
+                "days_since_delivery": (
+                    request.claim.days_since_delivery if request.claim else 0
+                ),
+                "evidence": (
+                    sorted(request.claim.evidence) if request.claim else []
+                ),
+            },
             "config": {
                 "review_risk_threshold": self.review_risk_threshold,
-                "large_booking_threshold": 10000,
-                "review_merchant_categories": [
-                    "cash_equivalent",
-                    "restricted_travel",
-                ],
+                "large_payout_threshold": (
+                    float(self.large_payout_threshold)
+                    if self.large_payout_threshold is not None
+                    else None
+                ),
+                "review_merchant_categories": sorted(
+                    self.review_merchant_categories
+                ),
+                "shipping_refund_cap": float(self.shipping_refund_cap),
+                "change_of_mind_days": self.change_of_mind_days,
             },
         }
         policy = self.policy_evaluator.evaluate(policy_input)
@@ -748,6 +860,7 @@ class PolicyEngine:
             remaining_daily_budget=remaining_budget,
             policy_version=policy.policy_version,
             risk=risk,
+            remedy=policy.remedy,
         )
         self.audit_ledger.append(
             "policy.evaluated",
@@ -758,6 +871,10 @@ class PolicyEngine:
                 "finding_codes": [item.code for item in policy.findings],
                 "policy_version": policy.policy_version,
                 "policy_engine": "opa_rego",
+                "remedy_kind": (
+                    policy.remedy.kind.value if policy.remedy else None
+                ),
+                "remedy_cap": str(policy.remedy.cap) if policy.remedy else None,
                 "declared_risk": risk.declared,
                 "derived_risk": risk.derived,
                 "effective_risk": risk.effective,
@@ -1769,6 +1886,75 @@ class PolicyEngine:
                     code=code, message=failure, blocking=True, context=context
                 )
             )
+
+    def _check_claim(
+        self,
+        findings: list[PolicyFinding],
+        request: ActionRequest,
+        agent: AgentProfile | None,
+        intent: IntentPassport | None,
+    ) -> Remedy | None:
+        """Bound the remedy a claim may buy. Mirrors the Rego claim rules.
+
+        The narrowing rule lives here: the cap is min'd with the agent's
+        per-action limit and the customer's authorised maximum, so a claim can
+        only ever choose a *better-shaped* settlement inside authority that
+        already existed. It can never enlarge it. That is what makes it safe
+        to take the claim from the agent, which is the only place it can come
+        from today.
+        """
+
+        if request.claim is None:
+            return None
+
+        permitted = _policy_remedy(
+            request.claim,
+            shipping_refund_cap=self.shipping_refund_cap,
+            change_of_mind_days=self.change_of_mind_days,
+        )
+        if permitted is None:
+            self._check(
+                findings,
+                condition=False,
+                code="CLAIM_NOT_RECOGNISED",
+                failure=(
+                    "No remedy rule matches this claim, so nothing about it "
+                    "has been authorised."
+                ),
+            )
+            return None
+
+        ceilings = [permitted.cap]
+        if agent is not None:
+            ceilings.append(agent.max_action_amount)
+        if intent is not None:
+            ceilings.append(intent.max_amount)
+        remedy = Remedy(kind=permitted.kind, cap=min(ceilings))
+
+        proposed = _REMEDY_FOR_ACTION.get(request.action, RemedyKind.NONE)
+        matched = proposed is remedy.kind
+        self._check(
+            findings,
+            condition=matched,
+            code="REMEDY_NOT_PERMITTED",
+            failure=(
+                f"A '{request.claim.reason.value}' claim is not settled with "
+                f"{proposed.value} under this policy; the permitted remedy is "
+                f"{remedy.kind.value}."
+            ),
+        )
+        if matched:
+            self._check(
+                findings,
+                condition=request.amount <= remedy.cap,
+                code="REMEDY_CAP_EXCEEDED",
+                failure=(
+                    f"The amount exceeds what a "
+                    f"'{request.claim.reason.value}' claim permits."
+                ),
+                context=FindingContext(limit=remedy.cap, actual=request.amount),
+            )
+        return remedy
 
     @staticmethod
     def _check_required_attributes(

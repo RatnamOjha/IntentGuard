@@ -7,17 +7,32 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .models import Decision, PolicyFinding
+from .models import Decision, PolicyFinding, Remedy, RemedyKind
 
 
 class PolicyEvaluationError(RuntimeError):
     pass
+
+
+def _remedy_from(value: Any) -> Remedy | None:
+    """Read the remedy out of a decision document.
+
+    ``null`` is the ordinary case -- the request carried no claim. An
+    unrecognised kind is not: it means policy and this code disagree about the
+    vocabulary, and quietly discarding it would drop a bound the engine is
+    meant to enforce.
+    """
+
+    if value is None:
+        return None
+    return Remedy(kind=RemedyKind(value["kind"]), cap=Decimal(str(value["cap"])))
 
 
 @dataclass(frozen=True)
@@ -25,6 +40,10 @@ class PolicyDecision:
     decision: Decision
     findings: tuple[PolicyFinding, ...]
     policy_version: str
+    #: What policy would honour for the claim, when the request carried one.
+    #: ``None`` for every request that did not, which is all of them until a
+    #: caller starts sending claims.
+    remedy: Remedy | None = None
 
 
 class PolicyEvaluator(Protocol):
@@ -181,6 +200,7 @@ class OpaCliPolicyEvaluator:
                 decision=Decision(value["decision"]),
                 findings=tuple(PolicyFinding(**item) for item in value["findings"]),
                 policy_version=version,
+                remedy=_remedy_from(value.get("remedy")),
             )
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise PolicyEvaluationError("OPA returned an invalid decision document.") from exc

@@ -9,7 +9,7 @@ base := {
 	"agent": {"known": true, "active": true, "revoked": false, "allowed_actions": ["book_hotel"], "max_action_amount": 20000, "remaining_daily_budget": 30000},
 	"intent": {"known": true, "agent_id": "travel-01", "action": "book_hotel", "customer_id": "customer-01", "currency": "INR", "max_amount": 18000, "expired": false, "required_attributes": {"refundable": true}},
 	"risk": {"declared": 10, "derived": 10, "effective": 10, "under_declared": false},
-	"config": {"review_risk_threshold": 70, "large_booking_threshold": 10000, "review_merchant_categories": ["cash_equivalent", "restricted_travel"]},
+	"config": {"review_risk_threshold": 70, "large_payout_threshold": 10000, "review_merchant_categories": ["cash_equivalent"], "shipping_refund_cap": 150, "change_of_mind_days": 7},
 }
 
 test_refundable_hotel_under_limit_is_allowed if {

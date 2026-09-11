@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from intentguard import ActionRequest, AgentProfile, Decision, IntentPassport, PolicyEngine
+from intentguard.models import ClaimReason, RefundClaim, RemedyKind
 from intentguard.auth import JwksAuthenticator
 from intentguard.policy import (
     InMemoryPolicyRepository,
@@ -160,8 +161,10 @@ def policy_input(**request_changes: object) -> dict:
         "risk": {"declared": 10, "derived": 10, "effective": 10, "under_declared": False},
         "config": {
             "review_risk_threshold": 70,
-            "large_booking_threshold": 10000,
-            "review_merchant_categories": ["cash_equivalent", "restricted_travel"],
+            "large_payout_threshold": 10000,
+            "review_merchant_categories": ["cash_equivalent"],
+            "shipping_refund_cap": 150,
+            "change_of_mind_days": 7,
         },
     }
 
@@ -172,7 +175,12 @@ class PolicyAsCodeTest(unittest.TestCase):
         self.repository = InMemoryPolicyRepository(initial_policy())
         self.evaluator = OpaCliPolicyEvaluator(OPA, self.repository)
         self.service = PolicyService(self.evaluator)
-        self.engine = PolicyEngine(policy_evaluator=self.evaluator, review_risk_threshold=70)
+        # The payout threshold is opt-in, so a test of it has to configure it.
+        self.engine = PolicyEngine(
+            policy_evaluator=self.evaluator,
+            review_risk_threshold=70,
+            large_payout_threshold=Decimal("10000"),
+        )
         self.engine.register_agent(
             AgentProfile("travel-01", "Travel", frozenset({"book_hotel"}), Decimal("20000"), Decimal("30000"))
         )
@@ -204,15 +212,15 @@ class PolicyAsCodeTest(unittest.TestCase):
         self.engine.stop_fleet(reason="matrix")
         self.assertEqual(Decision.DENY, self.engine.evaluate(self.request(), now=NOW).decision)
 
-    def test_large_booking_and_merchant_category_require_review(self) -> None:
+    def test_large_payout_and_merchant_category_require_review(self) -> None:
         self.assertEqual(Decision.REVIEW, self.engine.evaluate(self.request(amount="11000"), now=NOW).decision)
         value = policy_input(attributes={"refundable": True, "merchant_category": "cash_equivalent"})
         self.assertEqual(Decision.REVIEW, self.evaluator.evaluate_source(initial_policy().source, value).decision)
 
     def test_validate_dry_run_publish_compare_and_rollback(self) -> None:
-        source = initial_policy().source.replace('"large_booking_threshold": 10000', '"large_booking_threshold": 10000')
+        source = initial_policy().source.replace('"large_payout_threshold": 10000', '"large_payout_threshold": 10000')
         # Change the input-driven threshold reference into a fixed stricter rule.
-        source = source.replace("input.config.large_booking_threshold", "1000")
+        source = source.replace("input.config.large_payout_threshold", "1000")
         draft = self.service.create_draft(source, created_by="operator-1", description="Review bookings from 1,000")
         self.assertEqual("draft", draft.status)
         self.assertEqual(Decision.REVIEW, self.evaluator.evaluate_source(source, policy_input()).decision)
@@ -253,7 +261,7 @@ class PolicyApiTest(unittest.TestCase):
         headers = bearer(subject="operator-1", roles=["operator"])
         versions = client.get("/v1/policies", headers=headers)
         self.assertEqual(200, versions.status_code)
-        source = initial_policy().source.replace("input.config.large_booking_threshold", "1000")
+        source = initial_policy().source.replace("input.config.large_payout_threshold", "1000")
         draft = client.post("/v1/policies/drafts", headers=headers, json={"source": source, "description": "stricter review"})
         self.assertEqual(201, draft.status_code, draft.text)
         published = client.post(f"/v1/policies/{draft.json()['version_id']}/publish", headers=headers)
