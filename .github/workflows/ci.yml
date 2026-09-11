@@ -77,6 +77,13 @@ jobs:
         with:
           python-version: "3.11"
       - run: uv sync --all-extras --locked
+      # This job is the closest thing CI has to a deployment: a real database,
+      # the durable repositories, the HTTP surface. It ran the built-in
+      # evaluator against Postgres because OPA was never installed here, which
+      # is the mismatch INTENTGUARD_POLICY_ENGINE now refuses to allow
+      # silently. Install Rego so the job mirrors what a deployment runs.
+      - name: Install checksum-verified OPA
+        run: ./scripts/install-opa.sh
       - name: Database migrations
         run: uv run python scripts/migrate.py
       - name: Integration tests
