@@ -22,6 +22,8 @@ from .models import (
     AuthorizationLease,
     AuthorizationResult,
     ClaimReason,
+    EvidenceArtifact,
+    EvidenceKind,
     Decision,
     DecisionRecord,
     FindingContext,
@@ -306,6 +308,7 @@ _DATACLASSES = {
         IntentPassport,
         ActionRequest,
         RefundClaim,
+        EvidenceArtifact,
         Remedy,
         FindingContext,
         PolicyFinding,
@@ -324,6 +327,7 @@ _ENUMS = {
         ReservationStatus,
         ApprovalStatus,
         ClaimReason,
+        EvidenceKind,
         RemedyKind,
     )
 }

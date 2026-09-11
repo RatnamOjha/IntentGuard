@@ -55,6 +55,8 @@ from .models import (
     ActionRequest,
     AgentProfile,
     ClaimReason,
+    EvidenceArtifact,
+    EvidenceKind,
     IntentPassport,
     RefundClaim,
 )
@@ -278,6 +280,17 @@ class AgentPolicyUpdate(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class EvidenceArtifactPayload(BaseModel):
+    """A citation, not an upload. The gateway never fetches the reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: EvidenceKind
+    reference: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:/-]+$"
+    )
+
+
 class ClaimPayload(BaseModel):
     """The complaint behind a proposed action, as the agent describes it.
 
@@ -292,7 +305,25 @@ class ClaimPayload(BaseModel):
     reason: ClaimReason
     order_value: Decimal = Field(gt=0)
     days_since_delivery: int = Field(ge=0, le=3650)
-    evidence: set[str] = Field(default_factory=set, max_length=16)
+    #: The merchant's order or transaction id. Constrained rather than free
+    #: text: it is shown to an operator and written to the audit trail, and
+    #: an identifier has no business containing markup or newlines.
+    order_reference: str | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+    #: Evidence is *derived* from these, never accepted directly. A claim
+    #: cannot assert that a photo exists without naming a reference that an
+    #: investigator could take back to the order system and check.
+    artifacts: list[EvidenceArtifactPayload] = Field(
+        default_factory=list, max_length=16
+    )
+    #: The customer's words. Capped, and quarantined everywhere downstream --
+    #: see RefundClaim.complaint.
+    complaint: str | None = Field(default=None, max_length=2000)
+
+    @property
+    def derived_evidence(self) -> frozenset[str]:
+        return frozenset(artifact.kind.value for artifact in self.artifacts)
 
 
 class ActionAuthorize(BaseModel):
@@ -1030,7 +1061,15 @@ def create_app(
                     reason=payload.claim.reason,
                     order_value=payload.claim.order_value,
                     days_since_delivery=payload.claim.days_since_delivery,
-                    evidence=frozenset(payload.claim.evidence),
+                    evidence=payload.claim.derived_evidence,
+                    order_reference=payload.claim.order_reference,
+                    artifacts=tuple(
+                        EvidenceArtifact(
+                            kind=artifact.kind, reference=artifact.reference
+                        )
+                        for artifact in payload.claim.artifacts
+                    ),
+                    complaint=payload.claim.complaint,
                 )
                 if payload.claim is not None
                 else None
