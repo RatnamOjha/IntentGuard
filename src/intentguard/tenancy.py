@@ -32,6 +32,17 @@ from uuid import uuid4
 
 from .auth import AuthenticationError, Principal
 
+#: The organisation every pre-tenancy row was backfilled into by migration
+#: 0006, and the one a single-tenant deployment operates as. Handlers may rely
+#: on a principal always carrying an organisation; a nullable one is how a
+#: cross-tenant read gets written by accident later.
+DEFAULT_ORG_ID = "org_default"
+
+#: Every issued key starts with this. A JWT cannot: its first segment is
+#: base64url of a JSON object, which always begins ``e``. That makes the two
+#: credential kinds separable by inspection rather than by trial decoding.
+KEY_MARKER = "ig_"
+
 # 160 bits of entropy in the secret half of the key.
 _KEY_BYTES = 20
 # How much of the key is stored in the clear, as the indexed lookup handle.
@@ -104,6 +115,18 @@ def generate_api_key(environment: str = "live") -> tuple[str, str, str]:
 
 def hash_api_key(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def looks_like_api_key(credential: str) -> bool:
+    """Whether a presented credential is an API key rather than a JWT.
+
+    Used to route a credential to the right verifier, never to accept one. A
+    value that answers ``True`` here is still verified against the key store
+    and is refused if no store is configured -- so a wrong answer costs a 401,
+    not an authentication bypass.
+    """
+
+    return credential.startswith(KEY_MARKER)
 
 
 def key_prefix(secret: str) -> str:
