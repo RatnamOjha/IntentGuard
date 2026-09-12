@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 from binascii import Error as BinasciiError
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Lock
 from time import perf_counter
 from typing import Any, Callable
 
@@ -77,6 +79,13 @@ from .policy import (
     PostgresPolicyRepository,
     find_opa_executable,
     initial_policy,
+)
+from .tenancy import (
+    DEFAULT_ORG_ID,
+    ApiKeyError,
+    PostgresTenancyStore,
+    TenancyStore,
+    looks_like_api_key,
 )
 
 
@@ -237,6 +246,22 @@ def configured_engine(limits: AbuseLimits | None = None) -> PolicyEngine:
         max_outstanding_reservations=resolved_limits.max_outstanding_reservations,
         max_pending_approvals=resolved_limits.max_pending_approvals,
     )
+
+
+def configured_tenancy_store() -> TenancyStore | None:
+    """Share the database the rest of the gateway already uses, or run untenanted.
+
+    No database means no organisations to tell apart, so a principal is the
+    default organisation and every caller authenticates with a token, exactly
+    as before. This is the local demo and the test suite.
+
+    A database means organisations are real, and membership becomes required:
+    see ``resolve_org`` for why an unmapped subject is refused rather than
+    defaulted.
+    """
+
+    database_url = os.getenv("INTENTGUARD_DATABASE_URL")
+    return PostgresTenancyStore(database_url) if database_url else None
 
 
 class AgentCreate(BaseModel):
@@ -537,6 +562,7 @@ def create_app(
     authenticator: JwksAuthenticator | None = None,
     abuse_limits: AbuseLimits | None = None,
     rate_limiter: RateLimiter | None = None,
+    tenancy: TenancyStore | None = None,
 ) -> FastAPI:
     """Create an application with an injectable engine for tests and deployment."""
 
@@ -605,6 +631,29 @@ def create_app(
     app.state.demo_bootstrapped = False
     app.state.agent = GovernedAgent(app.state.engine, planner=build_planner())
     app.state.authenticator = authenticator or JwksAuthenticator.from_env()
+    app.state.tenancy = tenancy
+    # Whether organisations exist at all, which is a different question from
+    # whether the store has been built yet. Everything downstream must ask this
+    # one: treating "not built yet" as "no organisations" would default a
+    # caller into the default organisation while a database sits there holding
+    # somebody else's.
+    #
+    # Tenancy follows the engine, and that is not a convenience. ADR 004
+    # enforces tenancy at the repository boundary, and the repositories belong
+    # to the engine -- so a caller who injected an engine has taken over the
+    # construction this gateway would otherwise scope, and must inject the
+    # store alongside it. A deployment injects neither and gets both from the
+    # environment, so the production path cannot lose tenancy by accident.
+    app.state.tenancy_configured = tenancy is not None or (
+        engine is None and bool(os.getenv("INTENTGUARD_DATABASE_URL"))
+    )
+    app.state.tenancy_lock = Lock()
+
+    def close_tenancy() -> None:
+        if app.state.tenancy is not None:
+            app.state.tenancy.close()
+
+    app.router.add_event_handler("shutdown", close_tenancy)
     # Process-local and bounded. Evidence exists so an operator can look at it;
     # nothing in policy reads an image and no decision depends on one.
     app.state.evidence_store = InMemoryEvidenceStore()
@@ -663,16 +712,96 @@ def create_app(
     def governance_engine() -> PolicyEngine:
         return app.state.engine
 
+    def tenancy_store() -> TenancyStore | None:
+        """Open the store on first use rather than at boot.
+
+        An unreachable database must still let the gateway start and report
+        itself unready -- that is what ``/health/ready`` exists for -- instead
+        of killing the process on a blip. So the pool is opened by the first
+        request that needs it, and a failure to open it is a 503. It is never
+        a downgrade to single tenancy: a gateway that quietly forgot its
+        organisations would serve one tenant's data to another.
+        """
+
+        if not app.state.tenancy_configured:
+            return None
+        with app.state.tenancy_lock:
+            if app.state.tenancy is None:
+                try:
+                    app.state.tenancy = configured_tenancy_store()
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="The organisation store is unavailable.",
+                    ) from exc
+            return app.state.tenancy
+
+    def api_key_principal(secret: str) -> Principal:
+        """Verify a presented API key. A key carries its own organisation."""
+
+        store = tenancy_store()
+        if store is None:
+            # Reached only when a credential already looks like a key. Falling
+            # through to the JWT verifier would report a malformed token,
+            # which sends the caller looking in the wrong place.
+            raise ApiKeyError(
+                "API key authentication is not configured on this deployment."
+            )
+        return store.authenticate_key(secret, now=datetime.now(timezone.utc))
+
+    def resolve_org(principal: Principal) -> Principal:
+        """Attach the organisation a verified token subject acts for.
+
+        Membership is the authority, not the token. ADR 001 chose Keycloak for
+        operator SSO and ADR 004 kept organisation identity in our own
+        database, so the identity provider says *who* a caller is and
+        ``org_members`` says which organisation they act for and what they may
+        do there. A realm role on its own therefore grants nothing here.
+
+        An unmapped subject is refused rather than defaulted. Defaulting is the
+        shape this codebase has already paid for twice -- a silent permissive
+        fallback nobody revisits -- and here it would hand a stranger another
+        tenant's data on the day repositories start scoping by organisation.
+
+        With no store configured there are no organisations to confuse, so the
+        principal is the default organisation and nothing changes.
+        """
+
+        store = tenancy_store()
+        if store is None:
+            return replace(principal, org_id=DEFAULT_ORG_ID)
+        membership = store.membership(principal.subject)
+        if membership is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The authenticated subject belongs to no organisation.",
+            )
+        org_id, roles = membership
+        return replace(principal, org_id=org_id, roles=roles)
+
     def authenticated_principal(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     ) -> Principal:
-        authorization = (
-            f"{credentials.scheme} {credentials.credentials}"
-            if credentials is not None
-            else None
-        )
+        """Resolve either credential kind to the same Principal.
+
+        Handlers cannot tell an operator's token from an agent's key, which is
+        the point: authority comes from roles and bound identity, never from
+        how the caller authenticated.
+        """
+
+        presented = credentials.credentials.strip() if credentials is not None else ""
         try:
-            principal = app.state.authenticator.authenticate(authorization)
+            if looks_like_api_key(presented):
+                principal = api_key_principal(presented)
+            else:
+                authorization = (
+                    f"{credentials.scheme} {credentials.credentials}"
+                    if credentials is not None
+                    else None
+                )
+                principal = resolve_org(
+                    app.state.authenticator.authenticate(authorization)
+                )
         except AuthenticationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -683,6 +812,7 @@ def create_app(
             subject_id=principal.subject,
             agent_id=principal.agent_id,
             customer_id=principal.customer_id,
+            org_id=principal.org_id,
         )
         return principal
 
