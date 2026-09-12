@@ -27,14 +27,17 @@ import {
 } from "@/lib/intentguard-api";
 
 import { AgentChat, type ChatLine } from "./components/AgentChat";
-import { CaseFile, type CaseFileData } from "./components/CaseFile";
+import { ComplaintForm } from "./components/ComplaintForm";
+import { EvidenceViewer } from "./components/EvidenceViewer";
+import {
+  REASON_LABEL,
+  SEEDED_CASES,
+  type CaseRecord,
+} from "./lib/cases";
 import { AgentRoster } from "./components/AgentRoster";
 import { DecisionFeed, type FeedRow } from "./components/DecisionFeed";
-import { Money } from "./components/Money";
 import { Panel } from "./components/Panel";
-import { ScenarioList } from "./components/ScenarioList";
 import { Verdict, type VerdictData, type VerdictOutcome } from "./components/Verdict";
-import { scenarios, type ScenarioKey } from "./lib/scenarios";
 import styles from "./page.module.css";
 
 function outcomeOf(decision: string): VerdictOutcome {
@@ -125,7 +128,6 @@ export default function Console() {
   // enforced. Read from the record rather than inferred.
   const [evaluator, setEvaluator] = useState<string | null>(null);
   const [fleetStopped, setFleetStopped] = useState(false);
-  const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("overLimit");
   const [verdict, setVerdict] = useState<VerdictData | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -135,32 +137,15 @@ export default function Console() {
   const [chat, setChat] = useState<ChatLine[]>([]);
   const [planner, setPlanner] = useState<string | null>(null);
   const [talking, setTalking] = useState(false);
+  const [mode, setMode] = useState<"desk" | "file">("desk");
+  const [cases, setCases] = useState<CaseRecord[]>(SEEDED_CASES);
+  const [openCaseId, setOpenCaseId] = useState<string>(SEEDED_CASES[0].id);
+  // One verdict per case, so moving between cases does not lose the decision
+  // that was already taken on each.
+  const [verdicts, setVerdicts] = useState<Record<string, VerdictData>>({});
 
   const pending = approvals.filter((approval) => approval.status === "pending");
-
-  // Demo fixtures. A real deployment cites references into the merchant's
-  // order system and links out; the gateway stores no images, so there is
-  // nothing for it to serve.
-  const selected = scenarios[scenarioKey];
-  const caseFile: CaseFileData | null =
-    "claim" in selected && selected.claim
-      ? {
-          orderReference: selected.claim.order_reference,
-          reason: selected.claim.reason,
-          orderValue: selected.claim.order_value,
-          daysSinceDelivery: selected.claim.days_since_delivery,
-          artifacts: [...selected.claim.artifacts],
-          complaint: selected.claim.complaint,
-          previews: Object.fromEntries(
-            selected.claim.artifacts
-              .filter((artifact) => artifact.kind === "photo")
-              .map((artifact) => [
-                artifact.reference,
-                "/demo/damaged-parcel.svg",
-              ]),
-          ),
-        }
-      : null;
+  const openCase = cases.find((record) => record.id === openCaseId) ?? null;
 
   const refresh = useCallback(async () => {
     const [nextAgents, fleet, nextApprovals, events, status] = await Promise.all([
@@ -214,92 +199,64 @@ export default function Console() {
     })();
   }, [refresh]);
 
-  async function run() {
-    const scenario = scenarios[scenarioKey];
+  /** Put one case through the engine.
+   *
+   *  The agent proposes what it thinks the complaint is worth; the claim
+   *  travels with it, and policy decides which remedy may actually be
+   *  honoured and up to how much. */
+  async function runCase(record: CaseRecord) {
     const payload: ActionPayload = {
-      request_id: `req_${scenarioKey}_${Date.now()}`,
-      agent_id: scenario.agentId,
-      action: scenario.actionCode,
-      amount: scenario.amountValue,
+      request_id: `req_${record.id}_${Date.now()}`,
+      agent_id: record.agentId,
+      action: record.proposedAction,
+      amount: record.proposedAmount,
       currency: "INR",
-      intent_id: scenario.intentId,
-      risk_score: scenario.riskScore,
-      attributes: { ...scenario.attributes },
-      ...("claim" in scenario && scenario.claim
-        ? { claim: { ...scenario.claim, artifacts: [...scenario.claim.artifacts] } }
-        : {}),
+      intent_id: record.intentId,
+      risk_score: record.riskScore,
+      attributes: { ticket: record.orderReference },
+      claim: {
+        reason: record.reason,
+        order_value: record.orderValue,
+        days_since_delivery: record.daysSinceDelivery,
+        order_reference: record.orderReference,
+        artifacts: record.evidence.map(({ kind, reference }) => ({
+          kind,
+          reference,
+        })),
+        complaint: record.complaint,
+      },
     };
     setBusy(true);
     const startedAt = performance.now();
-    let restoreFleetAfter = false;
     try {
-      if (scenarioKey === "stale" && fleetStopped) await setFleetStop(false);
       const authorization = await authorizeAction(payload);
-
-      // The stale-lease scenario is the only one that needs a second act: hold
-      // a valid lease, stop the fleet, then present it to the connector.
-      if (scenarioKey === "stale" && authorization.decision.decision === "allow") {
-        await setFleetStop(true);
-        restoreFleetAfter = true;
-        let rejection = "";
-        try {
-          await commitAuthorization(authorization);
-        } catch (error) {
-          rejection = error instanceof Error ? error.message : "The connector rejected the lease.";
-        }
-        if (!rejection) throw new Error("The connector unexpectedly accepted a stale lease.");
-        setVerdict({
-          outcome: "Blocked",
-          agentName: scenario.agent,
-          action: scenario.actionCode,
-          amount: scenario.amountValue,
-          findings: [
-            {
-              code: "STALE_LEASE_REJECTED",
-              message: rejection,
-              blocking: true,
-              context: null,
-            },
-          ],
+      if (authorization.decision.decision === "allow") {
+        await commitAuthorization(authorization);
+      }
+      setVerdicts((current) => ({
+        ...current,
+        [record.id]: {
+          outcome: outcomeOf(authorization.decision.decision),
+          agentName: agentNameFor(record.agentId),
+          action: record.proposedAction,
+          amount: record.proposedAmount,
+          findings: authorization.decision.findings,
           latencyMs: performance.now() - startedAt,
           remainingBudget: Number(authorization.decision.remaining_daily_budget),
-          leaseId: null,
-          remedy: null,
-        });
-        await setFleetStop(false);
-        restoreFleetAfter = false;
-        await refresh();
-        setNotice("The connector refused a lease that the emergency stop had invalidated.");
-        return;
-      }
-
-      if (authorization.decision.decision === "allow") await commitAuthorization(authorization);
-
-      setVerdict({
-        outcome: outcomeOf(authorization.decision.decision),
-        agentName: scenario.agent,
-        action: scenario.actionCode,
-        amount: scenario.amountValue,
-        findings: authorization.decision.findings,
-        latencyMs: performance.now() - startedAt,
-        remainingBudget: Number(authorization.decision.remaining_daily_budget),
-        leaseId: authorization.lease?.lease_id ?? null,
-        remedy: authorization.decision.remedy,
-      });
+          leaseId: authorization.lease?.lease_id ?? null,
+          remedy: authorization.decision.remedy,
+        },
+      }));
       await refresh();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Evaluation failed.");
     } finally {
-      if (restoreFleetAfter) {
-        try {
-          await setFleetStop(false);
-          await refresh();
-        } catch {
-          setNotice("The lease was blocked, but the fleet still needs restoring.");
-        }
-      }
       setBusy(false);
     }
+  }
+
+  function agentNameFor(agentId: string): string {
+    return agents.find((agent) => agent.agent_id === agentId)?.name ?? agentId;
   }
 
   /** One conversational turn. The agent proposes; the engine decides, and its
@@ -313,7 +270,7 @@ export default function Console() {
     setTalking(true);
     const startedAt = performance.now();
     try {
-      const turn = await sendAgentMessage(scenarios[scenarioKey].agentId, message);
+      const turn = await sendAgentMessage("agt_refund_01", message);
       setPlanner(turn.planner);
       setChat((current) => [
         ...current,
@@ -328,7 +285,7 @@ export default function Console() {
       if (turn.authorization && turn.proposal) {
         setVerdict({
           outcome: outcomeOf(turn.authorization.decision.decision),
-          agentName: scenarios[scenarioKey].agent,
+          agentName: agentNameFor("agt_refund_01"),
           action: turn.proposal.action,
           amount: turn.proposal.amount,
           findings: turn.authorization.decision.findings,
@@ -363,8 +320,10 @@ export default function Console() {
     patch: { maxActionAmount?: string; addAction?: string },
     label: string,
   ) {
-    const scenario = scenarios[scenarioKey];
-    const agent = agents.find((candidate) => candidate.agent_id === scenario.agentId);
+    // Amend the agent that was actually refused: the one on the open case in
+    // the desk, or the tier-one agent the chat talks to.
+    const agentId = mode === "desk" && openCase ? openCase.agentId : "agt_refund_01";
+    const agent = agents.find((candidate) => candidate.agent_id === agentId);
     if (!agent) return;
     setBusy(true);
     try {
@@ -379,6 +338,13 @@ export default function Console() {
       await refresh();
       setNotice(`${label}. Run it again to see the new decision.`);
       setVerdict(null);
+      if (openCase) {
+        setVerdicts((current) => {
+          const next = { ...current };
+          delete next[openCase.id];
+          return next;
+        });
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Policy change failed.");
     } finally {
@@ -478,6 +444,40 @@ export default function Console() {
             {fleetStopped ? "Resume fleet" : "Emergency stop"}
           </button>
         </div>
+        <div className={styles.modes} role="tablist" aria-label="View">
+          <button
+            aria-selected={mode === "desk"}
+            className={mode === "desk" ? styles.modeOn : styles.mode}
+            onClick={() => setMode("desk")}
+            role="tab"
+            type="button"
+          >
+            Refund desk
+          </button>
+          <button
+            aria-selected={mode === "file"}
+            className={mode === "file" ? styles.modeOn : styles.mode}
+            onClick={() => setMode("file")}
+            role="tab"
+            type="button"
+          >
+            File a complaint
+          </button>
+        </div>
+        <button
+          className={styles.resetTop}
+          disabled={busy || talking}
+          onClick={() => {
+            setChat([]);
+            setVerdicts({});
+            setCases(SEEDED_CASES);
+            setOpenCaseId(SEEDED_CASES[0].id);
+            void reset();
+          }}
+          type="button"
+        >
+          Reset demo
+        </button>
       </header>
 
       {notice ? (
@@ -486,78 +486,188 @@ export default function Console() {
           <button onClick={() => setNotice("")} type="button" aria-label="Dismiss">×</button>
         </div>
       ) : null}
-
-      <main className={styles.main}>
-        <section className={styles.intro}>
-          <h1 className={styles.h1}>
-            Your support agent can issue refunds.
-            <br />
-            <span>It cannot issue the wrong ones.</span>
-          </h1>
-          <p className={styles.lede}>
-            Three AI agents handle refunds for a subscription company. Each one has
-            limits it cannot see, argue with, or change. Pick a request below and
-            watch the engine decide — every decision is sealed in a hash-chained
-            audit trail.
-          </p>
-        </section>
-
-        <section className={styles.console}>
-          <div className={styles.left}>
-            <AgentChat
-              busy={talking}
-              disabled={busy || link !== "live"}
-              lines={chat}
-              onSend={(message) => void talk(message)}
-              planner={planner}
-            />
-
-            <h2 className={`${styles.stepLabel} ${styles.orLabel}`}>
-              <span className={styles.step}>or</span> run a prepared request
-            </h2>
-            <ScenarioList
-              disabled={busy || link !== "live"}
-              onSelect={(key) => {
-                setScenarioKey(key);
-                setVerdict(null);
-              }}
-              selected={scenarioKey}
-            />
-            <button
-              className={styles.run}
-              disabled={busy || link !== "live"}
-              onClick={() => void run()}
-              type="button"
-            >
-              {busy ? "Evaluating…" : "Run it through IntentGuard"}
-              <span aria-hidden="true"> →</span>
-            </button>
-            <button
-              className={styles.reset}
-              disabled={busy || talking}
-              onClick={() => {
-                setChat([]);
-                void reset();
-              }}
-              type="button"
-            >
-              Reset demo
-            </button>
-          </div>
-
-          <div className={styles.right}>
-            <h2 className={styles.stepLabel}>
-              <span className={styles.step}>→</span> The decision
-            </h2>
+      {mode === "file" ? (
+        <main className={styles.lane}>
+          <AgentChat
+            busy={talking}
+            disabled={link !== "live"}
+            lines={chat}
+            onSend={(message) => void talk(message)}
+            planner={planner}
+          />
+          {verdict || talking ? (
             <Verdict
-              busy={busy}
+              busy={talking}
               data={verdict}
               onAmend={(patch, label) => void amend(patch, label)}
             />
-          </div>
-        </section>
+          ) : null}
+          <ComplaintForm
+            busy={busy}
+            onFiled={(record) => {
+              setCases((current) => [record, ...current]);
+              setOpenCaseId(record.id);
+              setMode("desk");
+              setNotice(
+                "Filed. It is now in the queue with the evidence attached.",
+              );
+            }}
+          />
+        </main>
+      ) : (
+        <main className={styles.desk}>
+          <aside className={styles.queue}>
+            <h2 className={styles.railHead}>
+              Queue <span>{cases.length}</span>
+            </h2>
+            <ul className={styles.caseList}>
+              {cases.map((record) => {
+                const settled = verdicts[record.id];
+                return (
+                  <li key={record.id}>
+                    <button
+                      className={
+                        record.id === openCaseId
+                          ? `${styles.caseRow} ${styles.caseRowOpen}`
+                          : styles.caseRow
+                      }
+                      onClick={() => setOpenCaseId(record.id)}
+                      type="button"
+                    >
+                      <span className={styles.caseTop}>
+                        <span className={styles.caseOrder}>
+                          {record.orderReference}
+                        </span>
+                        <span className={styles.caseTime}>{record.filedAt}</span>
+                      </span>
+                      <span className={styles.caseWho}>{record.customer}</span>
+                      <span className={styles.caseReason}>
+                        {REASON_LABEL[record.reason]} · ₹{record.orderValue}
+                      </span>
+                      <span className={styles.caseFoot}>
+                        <span className={styles.caseEvidence}>
+                          {record.evidence.length === 0
+                            ? "no evidence"
+                            : `${record.evidence.length} attached`}
+                        </span>
+                        {settled ? (
+                          <span
+                            className={
+                              settled.outcome === "Allowed"
+                                ? `${styles.caseTag} ${styles.tagOk}`
+                                : settled.outcome === "Review"
+                                  ? `${styles.caseTag} ${styles.tagHold}`
+                                  : `${styles.caseTag} ${styles.tagStop}`
+                            }
+                          >
+                            {settled.outcome === "Blocked"
+                              ? "Refused"
+                              : settled.outcome === "Review"
+                                ? "Review"
+                                : "Allowed"}
+                          </span>
+                        ) : (
+                          <span className={styles.caseTag}>open</span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </aside>
 
-        {caseFile ? <CaseFile data={caseFile} /> : null}
+          {openCase ? (
+            <section className={styles.caseView}>
+              <header className={styles.caseHead}>
+                <div>
+                  <h2 className={styles.caseTitle}>
+                    {REASON_LABEL[openCase.reason]}
+                  </h2>
+                  <p className={styles.caseSub}>
+                    {openCase.customer} · {openCase.orderReference} · filed{" "}
+                    {openCase.filedAt}
+                  </p>
+                </div>
+                <dl className={styles.caseFacts}>
+                  <div>
+                    <dt>Order value</dt>
+                    <dd>₹{openCase.orderValue}</dd>
+                  </div>
+                  <div>
+                    <dt>Since delivery</dt>
+                    <dd>
+                      {openCase.daysSinceDelivery} day
+                      {openCase.daysSinceDelivery === 1 ? "" : "s"}
+                    </dd>
+                  </div>
+                </dl>
+              </header>
+
+              <h3 className={styles.sectionLabel}>Evidence filed</h3>
+              <EvidenceViewer
+                evidence={openCase.evidence}
+                orderReference={openCase.orderReference}
+                orderValue={openCase.orderValue}
+              />
+
+              <h3 className={styles.sectionLabel}>
+                Customer&rsquo;s words <span>unverified</span>
+              </h3>
+              {/* Rendered as text, never markup. This string reaches the agent
+                  too, so it is already an injection surface; it must never be
+                  styled to look like something the system said. */}
+              <blockquote className={styles.quote}>
+                {openCase.complaint}
+              </blockquote>
+            </section>
+          ) : null}
+
+          <aside className={styles.decision}>
+            <h2 className={styles.railHead}>Decision</h2>
+            {openCase ? (
+              <div className={styles.proposal}>
+                <span className={styles.proposalLabel}>The agent proposes</span>
+                <p className={styles.proposalLine}>
+                  <strong>₹{openCase.proposedAmount}</strong>{" "}
+                  {openCase.proposedAction.replace(/_/g, " ")}
+                </p>
+                <p className={styles.proposalWho}>
+                  {agentNameFor(openCase.agentId)} · risk {openCase.riskScore}
+                </p>
+              </div>
+            ) : null}
+
+            <button
+              className={styles.runCase}
+              disabled={busy || !openCase || link !== "live"}
+              onClick={() => openCase && void runCase(openCase)}
+              type="button"
+            >
+              {busy ? "Evaluating…" : "Put it through IntentGuard"}
+              <span aria-hidden="true"> →</span>
+            </button>
+
+            <Verdict
+              busy={busy}
+              data={openCase ? (verdicts[openCase.id] ?? null) : null}
+              onAmend={(patch, label) => void amend(patch, label)}
+            />
+          </aside>
+        </main>
+      )}
+
+      <section className={styles.below}>
+        <Panel
+          title="The agents"
+          hint="Limits live in policy, not in the prompt. An agent cannot read or change them."
+        >
+          <AgentRoster
+            agents={agents}
+            busy={busy}
+            onToggle={(id, revoke) => void toggleAgent(id, revoke)}
+          />
+        </Panel>
 
         {pending.length > 0 ? (
           <Panel
@@ -567,43 +677,30 @@ export default function Console() {
             <ul className={styles.approvals}>
               {pending.map((approval) => (
                 <li key={approval.request_id}>
-                  <div>
-                    <strong>{approval.action.replaceAll("_", " ")}</strong>
-                    <span className={styles.approvalMeta}>
-                      {approval.agent_id} · <Money amount={approval.amount} size="sm" /> · risk{" "}
-                      {approval.risk_score}
-                    </span>
-                  </div>
-                  <div className={styles.approvalActions}>
+                  <span>
+                    {approval.action.replace(/_/g, " ")} · ₹{approval.amount}
+                  </span>
+                  <span className={styles.approvalActions}>
                     <button
-                      className={styles.reject}
-                      disabled={busy}
-                      onClick={() => void decide(approval.request_id, false)}
-                      type="button"
-                    >
-                      Reject
-                    </button>
-                    <button
-                      className={styles.approve}
                       disabled={busy}
                       onClick={() => void decide(approval.request_id, true)}
                       type="button"
                     >
                       Approve
                     </button>
-                  </div>
+                    <button
+                      disabled={busy}
+                      onClick={() => void decide(approval.request_id, false)}
+                      type="button"
+                    >
+                      Reject
+                    </button>
+                  </span>
                 </li>
               ))}
             </ul>
           </Panel>
         ) : null}
-
-        <Panel
-          title="The agents"
-          hint="Limits live in policy, not in the prompt. An agent cannot read or change them."
-        >
-          <AgentRoster agents={agents} busy={busy} onToggle={(id, revoke) => void toggleAgent(id, revoke)} />
-        </Panel>
 
         <Panel
           title="Every decision, in order"
@@ -621,7 +718,7 @@ export default function Console() {
         >
           <DecisionFeed rows={feed} />
         </Panel>
-      </main>
+      </section>
     </div>
   );
 }

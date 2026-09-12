@@ -30,25 +30,30 @@ test("server-renders the IntentGuard console", async () => {
   const html = await response.text();
   assert.match(html, /<title>IntentGuard \| Financial Agent Governance<\/title>/i);
 
-  // The page states what the product does before asking for any interaction.
-  assert.match(html, /Your support agent can issue/);
-  assert.match(html, /It cannot issue the wrong ones/);
+  // The console is a refund desk: a queue, the case being looked at, and the
+  // decision. It opens on a case rather than on an empty state.
+  assert.match(html, /Refund desk/i);
+  assert.match(html, /File a complaint/i);
+  assert.match(html, /Queue/);
 
-  // The agent surface leads, because a typed request is what makes the
-  // enforcement legible; the prepared scenarios are the fallback beneath it.
-  assert.match(html, /Talk to the agent/i);
-  assert.match(html, /never decides/i);
-  assert.match(html, /run a prepared request/i);
-  assert.match(html, /The decision/i);
+  // A case in the queue shows who filed it, what it is worth, and whether
+  // anything was attached -- enough to triage without opening it.
+  assert.match(html, /ORD-88213/);
+  assert.match(html, /R\. Mehta/);
+  assert.match(html, /Arrived damaged/);
+  assert.match(html, /attached/);
 
-  // Every scenario states its own expected outcome up front.
-  // React escapes the apostrophe, so match around it.
-  assert.match(html, /A refund above the agent&#x27;s limit/);
-  assert.match(html, /The billing agent tries to refund/);
-  assert.match(html, /A refund after the emergency stop/);
+  // The evidence and the complaint are the point of the case view, and the
+  // complaint must be labelled as the customer's own unverified words.
+  assert.match(html, /Evidence filed/i);
+  assert.match(html, /Customer.{1,8}s words/i);
+  assert.match(html, /unverified/i);
+  assert.match(html, /dinner set arrived/);
 
-  // The refusal is the hero, so the empty state must promise the explanation.
-  assert.match(html, /the exact rule that fired and the number that broke it/);
+  // The agent proposes; the engine decides. Both halves must be on screen.
+  assert.match(html, /The agent proposes/i);
+  assert.match(html, /Put it through IntentGuard/i);
+  assert.match(html, /Decision/);
 
   assert.match(html, /Emergency stop/);
   assert.match(html, /Every decision, in order/);
