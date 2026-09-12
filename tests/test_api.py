@@ -505,7 +505,9 @@ class ClaimOverHttpTest(unittest.TestCase):
                 "reason": "defect",
                 "order_value": "4200",
                 "days_since_delivery": 2,
-                "evidence": ["photo"],
+                "order_reference": "ORD-4418",
+                "artifacts": [{"kind": "photo", "reference": "img-991"}],
+                "complaint": "Arrived smashed, the box was crushed.",
             },
         )
         self.assertEqual(200, response.status_code)
@@ -524,7 +526,8 @@ class ClaimOverHttpTest(unittest.TestCase):
                 "reason": "defect",
                 "order_value": "4200",
                 "days_since_delivery": 2,
-                "evidence": [],
+                "order_reference": "ORD-4419",
+                "artifacts": [],
             },
         )
         self.assertEqual(200, response.status_code)
@@ -560,6 +563,75 @@ class ClaimOverHttpTest(unittest.TestCase):
             },
         )
         self.assertEqual(422, response.status_code)
+
+    def test_evidence_cannot_be_asserted_without_citing_an_artifact(self) -> None:
+        """The tightening: evidence is derived from citations, never supplied.
+
+        Accepting an evidence list directly let a claim assert that a photo
+        existed with nothing to check it against. It is now computed from the
+        artifacts, so claiming one means naming a reference an investigator can
+        take back to the order system.
+        """
+
+        response = self.post(
+            "claim-bare-evidence",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "evidence": ["photo"],
+            },
+        )
+        self.assertEqual(422, response.status_code)
+
+    def test_an_order_reference_cannot_carry_markup(self) -> None:
+        """It reaches an operator's screen, so it is an id or it is rejected."""
+
+        response = self.post(
+            "claim-markup-ref",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "order_reference": "<script>alert(1)</script>",
+            },
+        )
+        self.assertEqual(422, response.status_code)
+
+    def test_the_complaint_text_never_reaches_the_audit_chain(self) -> None:
+        """An append-only chain cannot be redacted, so prose must not go in it.
+
+        Presence and length are recorded, which is what an investigator needs
+        to know a statement existed. The statement itself stays on the decision
+        record, where retention rules can still reach it.
+        """
+
+        canary = "CANARY-7f3a-customer-wrote-this-prose"
+        self.post(
+            "claim-canary",
+            {
+                "reason": "defect",
+                "order_value": "4200",
+                "days_since_delivery": 2,
+                "order_reference": "ORD-9001",
+                "artifacts": [{"kind": "photo", "reference": "img-77"}],
+                "complaint": canary,
+            },
+        )
+        events = self.client.get("/v1/audit/events")
+        self.assertEqual(200, events.status_code)
+        body = events.text
+
+        self.assertNotIn(
+            canary,
+            body,
+            "The customer's words were written into the hash chain, which can "
+            "never be redacted.",
+        )
+        # ...but the fact of it, and the citation, must be there to audit.
+        self.assertIn("complaint_present", body)
+        self.assertIn("photo:img-77", body)
+        self.assertIn("ORD-9001", body)
 
     def test_omitting_the_claim_keeps_the_previous_behaviour(self) -> None:
         response = self.post("claim-none", None)

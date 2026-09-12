@@ -54,6 +54,36 @@ _REMEDY_FOR_ACTION = {
 }
 
 
+def _claim_audit_fields(claim: RefundClaim | None) -> dict[str, Any]:
+    """What a claim contributes to the immutable record.
+
+    The complaint text is recorded as presence and length, never as content.
+    An append-only hash chain cannot be redacted, so writing customer prose
+    into one is a permanent decision made on the customer's behalf; the same
+    reasoning as Decisions #5, which records the *names* of conflicting fields
+    rather than their submitted values. The text stays on the decision record,
+    where an operator can read it and retention rules can reach it.
+
+    Evidence references are recorded in full, because that is the whole point
+    of them: they are how someone checks, months later, whether the photo an
+    agent cited ever existed.
+    """
+
+    if claim is None:
+        return {"claim_present": False}
+    return {
+        "claim_present": True,
+        "claim_reason": claim.reason.value,
+        "order_reference": claim.order_reference,
+        "evidence_cited": sorted(
+            f"{artifact.kind.value}:{artifact.reference}"
+            for artifact in claim.artifacts
+        ),
+        "complaint_present": claim.complaint is not None,
+        "complaint_chars": len(claim.complaint or ""),
+    }
+
+
 def _policy_remedy(
     claim: RefundClaim,
     *,
@@ -745,6 +775,7 @@ class PolicyEngine:
                 # is part of the record -- and the first field an investigator
                 # would want if they ever disagreed in production.
                 "policy_engine": "builtin",
+                **_claim_audit_fields(request.claim),
                 "remedy_kind": remedy.kind.value if remedy else None,
                 "remedy_cap": str(remedy.cap) if remedy else None,
                 "declared_risk": risk.declared,
@@ -871,6 +902,7 @@ class PolicyEngine:
                 "finding_codes": [item.code for item in policy.findings],
                 "policy_version": policy.policy_version,
                 "policy_engine": "opa_rego",
+                **_claim_audit_fields(request.claim),
                 "remedy_kind": (
                     policy.remedy.kind.value if policy.remedy else None
                 ),

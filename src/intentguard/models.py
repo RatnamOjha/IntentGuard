@@ -95,6 +95,33 @@ class RemedyKind(str, Enum):
     NONE = "none"
 
 
+class EvidenceKind(str, Enum):
+    """What a cited piece of supporting material is."""
+
+    PHOTO = "photo"
+    RECEIPT = "receipt"
+    COURIER_SCAN = "courier_scan"
+
+
+@dataclass(frozen=True)
+class EvidenceArtifact:
+    """A pointer to material held in the merchant's own systems.
+
+    A reference, never the bytes. IntentGuard governs decisions; it is not a
+    document store, and accepting uploads would add an image-serving surface
+    (content-type sniffing, SVG carrying script, size limits) to a service
+    whose job is to say yes or no.
+
+    The reference is what makes the claim checkable after the fact: an
+    investigator reading the audit trail can take it back to the order system
+    and see whether the photo an agent cited actually exists.
+    """
+
+    kind: EvidenceKind
+    #: Opaque id in the merchant's system. Never dereferenced by the gateway.
+    reference: str
+
+
 @dataclass(frozen=True)
 class RefundClaim:
     """What the agent asserts about the complaint behind this action.
@@ -117,8 +144,28 @@ class RefundClaim:
     #: What the order was worth. Bounds a full refund.
     order_value: Decimal
     days_since_delivery: int
-    #: Supporting material the agent says exists, e.g. "photo", "courier_scan".
+    #: Evidence kinds policy may act on. Over HTTP this is *derived* from
+    #: ``artifacts`` rather than accepted directly, so nothing can claim a
+    #: photo exists without naming a reference someone could go and check.
     evidence: frozenset[str] = frozenset()
+    #: The merchant's own order or transaction id. Carried for the operator
+    #: and the audit trail; deliberately not part of the policy input, since
+    #: no rule should key off an identifier the agent chooses.
+    order_reference: str | None = None
+    #: References to supporting material. See EvidenceArtifact.
+    artifacts: tuple[EvidenceArtifact, ...] = ()
+    #: The customer's own account of the problem, for a human to read.
+    #:
+    #: **Quarantined text.** It never reaches the policy input, never appears
+    #: in a PolicyFinding message, and never enters the audit ledger. The
+    #: first two keep attacker-controlled text from steering a decision or
+    #: being echoed as though the engine said it. The third is about
+    #: permanence: an append-only hash chain cannot be redacted, so customer
+    #: prose must not be written into one. The console renders it as quoted,
+    #: attributed, untrusted content and never as system chrome -- the same
+    #: text is read by the agent, so it is already an injection surface, and
+    #: an operator is as worth protecting from it as the model is.
+    complaint: str | None = None
 
 
 @dataclass(frozen=True)

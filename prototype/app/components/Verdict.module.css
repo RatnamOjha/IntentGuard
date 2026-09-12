@@ -192,3 +192,34 @@
   font-size: 0.6875rem;
 }
 .sealed { margin-left: auto; }
+
+/* What policy will honour. On a refusal this is the actionable half of the
+   card: the operator is told what to do instead, not only what was stopped. */
+.remedy,
+.remedyOk {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+}
+.remedy { background: var(--hold-wash); border-color: transparent; }
+.remedyOk { background: var(--pass-wash); border-color: transparent; }
+.remedyLabel {
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+  color: var(--ink-faint);
+}
+.remedyKind {
+  margin-top: 4px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.remedyCap {
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+.remedyCap strong { font-weight: 700; color: var(--ink); }

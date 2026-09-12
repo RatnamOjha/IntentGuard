@@ -33,6 +33,7 @@ export type ApiAuthorization = {
     remaining_daily_budget: string;
     policy_version: string;
     risk: ApiRiskAssessment | null;
+    remedy: ApiRemedy | null;
   };
   reservation: {
     reservation_id: string;
@@ -162,6 +163,37 @@ export type ApiAgentTurn = {
   authorization: ApiAuthorization | null;
 };
 
+export type ApiEvidenceKind = "photo" | "receipt" | "courier_scan";
+
+/** A citation into the merchant's systems, never bytes the gateway serves. */
+export type ApiEvidenceArtifact = {
+  kind: ApiEvidenceKind;
+  reference: string;
+};
+
+export type ApiClaimReason =
+  | "defect"
+  | "not_delivered"
+  | "late"
+  | "changed_mind";
+
+export type ApiClaim = {
+  reason: ApiClaimReason;
+  order_value: string;
+  days_since_delivery: number;
+  order_reference: string | null;
+  artifacts: ApiEvidenceArtifact[];
+  /** The customer's own words. Untrusted: render as a quotation, never as
+   *  chrome, and never with dangerouslySetInnerHTML. */
+  complaint: string | null;
+};
+
+/** What policy will honour -- an envelope, not an instruction. */
+export type ApiRemedy = {
+  kind: "refund_to_source" | "store_credit" | "shipping_refund" | "reschedule" | "none";
+  cap: string | number;
+};
+
 export type ActionPayload = {
   request_id: string;
   agent_id: string;
@@ -171,6 +203,14 @@ export type ActionPayload = {
   intent_id: string;
   risk_score: number;
   attributes: Record<string, unknown>;
+  claim?: {
+    reason: ApiClaimReason;
+    order_value: string;
+    days_since_delivery: number;
+    order_reference?: string;
+    artifacts?: ApiEvidenceArtifact[];
+    complaint?: string;
+  };
 };
 
 /** The seeded demo customer. The gateway takes the real one from the token
@@ -248,6 +288,56 @@ async function apiRequest<T>(
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+export type ApiStoredEvidence = {
+  reference: string;
+  kind: ApiEvidenceKind;
+  media_type: string;
+  byte_length: number;
+};
+
+/** Upload one evidence image and get back the reference a claim can cite.
+ *
+ *  Base64 rather than multipart, matching the gateway: see upload_evidence.
+ *  The file is read in the browser, so nothing is sent until the customer
+ *  actually submits. */
+export async function uploadEvidence(
+  file: File,
+  kind: ApiEvidenceKind,
+): Promise<ApiStoredEvidence> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  // Chunked: String.fromCharCode(...bytes) blows the argument limit on
+  // anything larger than a small thumbnail.
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return apiRequest<ApiStoredEvidence>(
+    "/v1/evidence",
+    {
+      method: "POST",
+      body: JSON.stringify({ kind, content_base64: btoa(binary) }),
+    },
+    CUSTOMER_ACCESS_TOKEN ?? ACCESS_TOKEN,
+  );
+}
+
+/** Fetch stored evidence as an object URL.
+ *
+ *  An <img src> cannot carry an Authorization header, and the endpoint
+ *  requires one -- so the bytes are fetched with the token and handed to the
+ *  browser as a blob. Callers must revoke the URL when the image unmounts,
+ *  or the blob is retained for the life of the document. */
+export async function fetchEvidenceObjectUrl(reference: string): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/v1/evidence/${reference}`, {
+    headers: ACCESS_TOKEN ? { Authorization: `Bearer ${ACCESS_TOKEN}` } : {},
+  });
+  if (!response.ok) {
+    throw new ApiError(`Evidence ${reference} is unavailable.`, response.status);
+  }
+  return URL.createObjectURL(await response.blob());
 }
 
 export function bootstrapDemo() {
