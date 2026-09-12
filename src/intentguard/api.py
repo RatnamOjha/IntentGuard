@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+from binascii import Error as BinasciiError
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -51,6 +53,10 @@ from .execution_lease import (
     decode_lease_private_key,
 )
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from .evidence import (
+    EvidenceValidationError,
+    InMemoryEvidenceStore,
+)
 from .models import (
     ActionRequest,
     AgentProfile,
@@ -278,6 +284,18 @@ class AgentPolicyUpdate(BaseModel):
     daily_budget: Decimal = Field(ge=0)
     active: bool = True
     reason: str = Field(min_length=1, max_length=500)
+
+
+class EvidenceUpload(BaseModel):
+    """An evidence image, base64 encoded. See upload_evidence for why."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: EvidenceKind
+    #: Base64 of the raw bytes. The cap is generous for the 5 MiB limit the
+    #: store enforces on the decoded content, and exists so an oversized body
+    #: is rejected before it is decoded rather than after.
+    content_base64: str = Field(min_length=4, max_length=8 * 1024 * 1024)
 
 
 class EvidenceArtifactPayload(BaseModel):
@@ -587,6 +605,9 @@ def create_app(
     app.state.demo_bootstrapped = False
     app.state.agent = GovernedAgent(app.state.engine, planner=build_planner())
     app.state.authenticator = authenticator or JwksAuthenticator.from_env()
+    # Process-local and bounded. Evidence exists so an operator can look at it;
+    # nothing in policy reads an image and no decision depends on one.
+    app.state.evidence_store = InMemoryEvidenceStore()
     app.state.policy_service = (
         PolicyService(app.state.engine.policy_evaluator)
         if isinstance(app.state.engine.policy_evaluator, OpaCliPolicyEvaluator)
@@ -745,6 +766,8 @@ def create_app(
     fleet_reader = roles("operator", "reviewer", "connector")
     connector_principal = roles("connector")
     admin_principal = roles("admin")
+    evidence_reader = roles("operator", "reviewer", "agent", "customer", "admin")
+    evidence_writer = roles("customer", "admin")
 
     def policy_service() -> PolicyService:
         service = app.state.policy_service
@@ -1334,6 +1357,79 @@ def create_app(
         principal: Principal = Depends(operator_principal),
     ) -> None:
         governance_engine().resume_fleet()
+
+    @app.post("/v1/evidence", status_code=201, tags=["evidence"])
+    def upload_evidence(
+        payload: EvidenceUpload,
+        principal: Principal = Depends(evidence_writer),
+    ) -> dict[str, Any]:
+        """Store an evidence image and return the reference a claim can cite.
+
+        Base64 in JSON rather than multipart, deliberately: a multipart parser
+        is itself attack surface on the one endpoint whose whole job is taking
+        hostile bytes, and staying on JSON keeps the existing authentication,
+        rate limiting and validation applying unchanged.
+        """
+
+        try:
+            content = base64.b64decode(payload.content_base64, validate=True)
+        except (BinasciiError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422, detail="content_base64 is not valid base64."
+            ) from exc
+        try:
+            stored = app.state.evidence_store.put(
+                kind=payload.kind,
+                content=content,
+                uploaded_by=principal.subject,
+            )
+        except EvidenceValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        governance_engine().audit_ledger.append(
+            "evidence.stored",
+            {
+                "reference": stored.reference,
+                "kind": stored.kind.value,
+                "media_type": stored.media_type,
+                "byte_length": len(stored.content),
+                "uploaded_by": principal.subject,
+            },
+        )
+        return {
+            "reference": stored.reference,
+            "kind": stored.kind.value,
+            "media_type": stored.media_type,
+            "byte_length": len(stored.content),
+        }
+
+    @app.get("/v1/evidence/{reference}", tags=["evidence"])
+    def read_evidence(
+        reference: str,
+        principal: Principal = Depends(evidence_reader),
+    ) -> Response:
+        """Serve stored evidence, treating the response as hostile.
+
+        The media type is the one sniffed at upload, never anything a caller
+        said. nosniff stops a browser second-guessing it, the disposition
+        filename is generated rather than supplied, and the CSP permits
+        nothing at all -- so even a file that somehow reached storage with a
+        script inside it has no way to run.
+        """
+
+        stored = app.state.evidence_store.get(reference)
+        if stored is None:
+            raise HTTPException(status_code=404, detail="No such evidence.")
+        return Response(
+            content=stored.content,
+            media_type=stored.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": f'inline; filename="{stored.filename}"',
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "Cache-Control": "private, max-age=300",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     @app.get("/v1/approvals", tags=["approvals"])
     def list_approvals(
