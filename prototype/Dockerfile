@@ -16,6 +16,15 @@ FROM node:24.20.0-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
+# The same base hardening the gateway image has carried since it was written.
+# A pinned Debian base drifts out of date the moment an advisory lands against
+# it, and the tag alone never changes -- so without this the image ships
+# whatever was current when the tag was cut. Trivy gates HIGH and CRITICAL on
+# fixed packages, which is what makes the omission fail loudly rather than
+# quietly.
+RUN apt-get update \
+    && apt-get upgrade --yes \
+    && rm -rf /var/lib/apt/lists/*
 RUN rm --recursive /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/npm \
     && rm --force /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx \
     && groupadd --system intentguard \
