@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from intentguard import PolicyEngine  # noqa: E402
 from intentguard.evidence import (  # noqa: E402
+    CASE_REVIEWER_ROLES,
     MAX_BYTES,
     EvidenceValidationError,
     InMemoryEvidenceStore,
@@ -149,6 +150,26 @@ class OwnershipTest(unittest.TestCase):
                 ),
                 f"{role} must be able to review the evidence on a case",
             )
+
+    def test_the_agent_role_is_deliberately_not_a_case_reviewer(self) -> None:
+        """A decision, not an omission. Reviewed and kept, 22 Sep.
+
+        The agent is the untrusted party in this system: it proposes remedies
+        and never decides them. Nothing in the decision path dereferences an
+        image -- policy reads claims and evidence *references*, never bytes --
+        so a blanket read over every customer photograph in an organisation
+        buys the agent nothing and costs the whole store.
+
+        This test exists so that adding ``agent`` back is a deliberate act
+        with a named failure, rather than a plausible-looking widening of a
+        role list. If a design partner ever needs it, change this test in the
+        same commit and say why.
+        """
+
+        self.assertNotIn("agent", CASE_REVIEWER_ROLES)
+        self.assertEqual(
+            frozenset({"operator", "reviewer", "admin"}), CASE_REVIEWER_ROLES
+        )
 
     def test_a_customer_cannot_read_another_customers_evidence(self) -> None:
         store = InMemoryEvidenceStore()

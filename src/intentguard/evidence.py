@@ -73,6 +73,10 @@ class EvidenceValidationError(ValueError):
 #: dereferences an image, so it has no standing to read every customer
 #: photograph in an organisation. An agent bound to a customer still reads that
 #: customer's evidence through the ownership rule below.
+#:
+#: That exclusion is a reviewed decision (22 Sep), not an oversight, and
+#: ``test_the_agent_role_is_deliberately_not_a_case_reviewer`` pins the
+#: membership of this set so that re-adding ``agent`` fails by name.
 CASE_REVIEWER_ROLES = frozenset({"operator", "reviewer", "admin"})
 
 

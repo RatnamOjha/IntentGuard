@@ -897,6 +897,11 @@ def create_app(
     fleet_reader = roles("operator", "reviewer", "connector")
     connector_principal = roles("connector")
     admin_principal = roles("admin")
+    # Who may *call* the endpoint. Who may see a given image is a narrower
+    # question answered by evidence.may_read, and `agent` is deliberately not
+    # a case reviewer there -- it reads only the evidence of the customer its
+    # credential is bound to. The role stays here because that bound read is
+    # legitimate; the narrowing belongs with the ownership rule, not the gate.
     evidence_reader = roles("operator", "reviewer", "agent", "customer", "admin")
     evidence_writer = roles("customer", "admin")
 
