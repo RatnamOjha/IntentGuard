@@ -58,6 +58,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .evidence import (
     EvidenceValidationError,
     InMemoryEvidenceStore,
+    may_read as may_read_evidence,
 )
 from .models import (
     ActionRequest,
@@ -896,6 +897,11 @@ def create_app(
     fleet_reader = roles("operator", "reviewer", "connector")
     connector_principal = roles("connector")
     admin_principal = roles("admin")
+    # Who may *call* the endpoint. Who may see a given image is a narrower
+    # question answered by evidence.may_read, and `agent` is deliberately not
+    # a case reviewer there -- it reads only the evidence of the customer its
+    # credential is bound to. The role stays here because that bound read is
+    # legitimate; the narrowing belongs with the ownership rule, not the gate.
     evidence_reader = roles("operator", "reviewer", "agent", "customer", "admin")
     evidence_writer = roles("customer", "admin")
 
@@ -1488,6 +1494,22 @@ def create_app(
     ) -> None:
         governance_engine().resume_fleet()
 
+    def evidence_scope(principal: Principal) -> str:
+        """The organisation whose evidence this caller may touch.
+
+        ``authenticated_principal`` always resolves an organisation, so this
+        is unreachable in practice. It is written to fail closed anyway: the
+        field is optional on ``Principal``, and an evidence store that reads a
+        ``None`` scope would serve across tenants rather than refuse.
+        """
+
+        if principal.org_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The authenticated subject belongs to no organisation.",
+            )
+        return principal.org_id
+
     @app.post("/v1/evidence", status_code=201, tags=["evidence"])
     def upload_evidence(
         payload: EvidenceUpload,
@@ -1512,6 +1534,8 @@ def create_app(
                 kind=payload.kind,
                 content=content,
                 uploaded_by=principal.subject,
+                org_id=evidence_scope(principal),
+                customer_id=principal.customer_id,
             )
         except EvidenceValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1523,6 +1547,8 @@ def create_app(
                 "media_type": stored.media_type,
                 "byte_length": len(stored.content),
                 "uploaded_by": principal.subject,
+                "org_id": stored.org_id,
+                "customer_id": stored.customer_id,
             },
         )
         return {
@@ -1544,10 +1570,23 @@ def create_app(
         filename is generated rather than supplied, and the CSP permits
         nothing at all -- so even a file that somehow reached storage with a
         script inside it has no way to run.
+
+        Holding the reference is not the same as being allowed to see it. The
+        store answers only within the caller's organisation, and ``may_read``
+        then applies the rule inside it. Both refusals are reported as 404,
+        identically to a reference that never existed, so the response cannot
+        be used to confirm that one does.
         """
 
-        stored = app.state.evidence_store.get(reference)
-        if stored is None:
+        stored = app.state.evidence_store.get(
+            reference, org_id=evidence_scope(principal)
+        )
+        if stored is None or not may_read_evidence(
+            stored,
+            roles=principal.roles,
+            subject=principal.subject,
+            customer_id=principal.customer_id,
+        ):
             raise HTTPException(status_code=404, detail="No such evidence.")
         return Response(
             content=stored.content,

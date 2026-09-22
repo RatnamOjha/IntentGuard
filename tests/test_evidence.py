@@ -18,9 +18,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from intentguard import PolicyEngine  # noqa: E402
 from intentguard.evidence import (  # noqa: E402
+    CASE_REVIEWER_ROLES,
     MAX_BYTES,
     EvidenceValidationError,
     InMemoryEvidenceStore,
+    may_read,
     sniff_media_type,
 )
 from intentguard.models import EvidenceKind  # noqa: E402
@@ -76,8 +78,12 @@ class StoreTest(unittest.TestCase):
         """The reference becomes a URL segment and a filename."""
 
         store = InMemoryEvidenceStore()
-        first = store.put(kind=EvidenceKind.PHOTO, content=PNG, uploaded_by="c1")
-        second = store.put(kind=EvidenceKind.PHOTO, content=PNG, uploaded_by="c1")
+        first = store.put(
+            kind=EvidenceKind.PHOTO, content=PNG, uploaded_by="c1", org_id="org_a"
+        )
+        second = store.put(
+            kind=EvidenceKind.PHOTO, content=PNG, uploaded_by="c1", org_id="org_a"
+        )
 
         self.assertNotEqual(first.reference, second.reference)
         self.assertTrue(first.reference.startswith("ev_"))
@@ -90,7 +96,148 @@ class StoreTest(unittest.TestCase):
                 kind=EvidenceKind.PHOTO,
                 content=PNG + b"\x00" * MAX_BYTES,
                 uploaded_by="c1",
+                org_id="org_a",
             )
+
+
+class OwnershipTest(unittest.TestCase):
+    """The rule itself, away from the web layer.
+
+    Finding K: before this, holding a reference was the whole of the check.
+    """
+
+    def store_one(self, store, **kwargs):
+        defaults = {
+            "kind": EvidenceKind.PHOTO,
+            "content": PNG,
+            "uploaded_by": "alice",
+            "org_id": "org_a",
+            "customer_id": "customer-alice",
+        }
+        return store.put(**{**defaults, **kwargs})
+
+    def test_another_organisation_cannot_resolve_the_reference(self) -> None:
+        """The hard boundary. This is what ADR 004 would otherwise have missed."""
+
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        self.assertIsNotNone(store.get(stored.reference, org_id="org_a"))
+        self.assertIsNone(store.get(stored.reference, org_id="org_b"))
+
+    def test_a_cross_tenant_read_is_indistinguishable_from_a_miss(self) -> None:
+        """Absent, not forbidden -- so the answer cannot confirm the reference."""
+
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        self.assertEqual(
+            store.get("ev_" + "0" * 32, org_id="org_b"),
+            store.get(stored.reference, org_id="org_b"),
+        )
+
+    def test_a_case_reviewer_reads_anything_in_the_organisation(self) -> None:
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        for role in ("operator", "reviewer", "admin"):
+            self.assertTrue(
+                may_read(
+                    stored,
+                    roles=frozenset({role}),
+                    subject="someone-else",
+                    customer_id=None,
+                ),
+                f"{role} must be able to review the evidence on a case",
+            )
+
+    def test_the_agent_role_is_deliberately_not_a_case_reviewer(self) -> None:
+        """A decision, not an omission. Reviewed and kept, 22 Sep.
+
+        The agent is the untrusted party in this system: it proposes remedies
+        and never decides them. Nothing in the decision path dereferences an
+        image -- policy reads claims and evidence *references*, never bytes --
+        so a blanket read over every customer photograph in an organisation
+        buys the agent nothing and costs the whole store.
+
+        This test exists so that adding ``agent`` back is a deliberate act
+        with a named failure, rather than a plausible-looking widening of a
+        role list. If a design partner ever needs it, change this test in the
+        same commit and say why.
+        """
+
+        self.assertNotIn("agent", CASE_REVIEWER_ROLES)
+        self.assertEqual(
+            frozenset({"operator", "reviewer", "admin"}), CASE_REVIEWER_ROLES
+        )
+
+    def test_a_customer_cannot_read_another_customers_evidence(self) -> None:
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        self.assertFalse(
+            may_read(
+                stored,
+                roles=frozenset({"customer"}),
+                subject="mallory",
+                customer_id="customer-mallory",
+            )
+        )
+
+    def test_a_customer_reads_their_own_evidence(self) -> None:
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        self.assertTrue(
+            may_read(
+                stored,
+                roles=frozenset({"customer"}),
+                subject="alice",
+                customer_id="customer-alice",
+            )
+        )
+
+    def test_an_agent_is_not_a_case_reviewer(self) -> None:
+        """The untrusted party does not get to read every photograph.
+
+        Nothing in the decision path dereferences an image, so an agent has no
+        standing to. One bound to the customer still reads that customer's.
+        """
+
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store)
+
+        self.assertFalse(
+            may_read(
+                stored,
+                roles=frozenset({"agent"}),
+                subject="agent-bot",
+                customer_id="customer-bob",
+            )
+        )
+        self.assertTrue(
+            may_read(
+                stored,
+                roles=frozenset({"agent"}),
+                subject="agent-bot",
+                customer_id="customer-alice",
+            )
+        )
+
+    def test_two_unattributed_parties_are_not_the_same_customer(self) -> None:
+        """``None == None`` must not read as an identity."""
+
+        store = InMemoryEvidenceStore()
+        stored = self.store_one(store, customer_id=None)
+
+        self.assertFalse(
+            may_read(
+                stored,
+                roles=frozenset({"customer"}),
+                subject="mallory",
+                customer_id=None,
+            )
+        )
 
 
 def customer_headers(subject: str = "evidence-customer") -> dict[str, str]:
@@ -191,3 +338,102 @@ class EvidenceApiTest(unittest.TestCase):
         self.assertEqual(200, events.status_code)
         self.assertIn(reference, events.text)
         self.assertIn("evidence.stored", events.text)
+
+
+class EvidenceAuthorizationApiTest(unittest.TestCase):
+    """Finding K, through the gateway.
+
+    Every case here returned 200 before the ownership check existed: the
+    reference was the whole of the control, and any authenticated role that
+    held one got the bytes.
+    """
+
+    def setUp(self) -> None:
+        from intentguard.api import create_app
+
+        self.client = TestClient(
+            create_app(PolicyEngine(), authenticator=test_authenticator())
+        )
+
+    def upload_as_alice(self) -> str:
+        created = self.client.post(
+            "/v1/evidence",
+            json={
+                "kind": "photo",
+                "content_base64": base64.b64encode(PNG).decode(),
+            },
+            headers=bearer(
+                subject="alice", roles=["customer"], customer_id="customer-alice"
+            ),
+        )
+        self.assertEqual(201, created.status_code)
+        return created.json()["reference"]
+
+    def test_another_customer_holding_the_reference_is_refused(self) -> None:
+        reference = self.upload_as_alice()
+
+        response = self.client.get(
+            f"/v1/evidence/{reference}",
+            headers=bearer(
+                subject="mallory",
+                roles=["customer"],
+                customer_id="customer-mallory",
+            ),
+        )
+
+        self.assertEqual(404, response.status_code)
+        self.assertNotEqual(PNG, response.content)
+
+    def test_the_uploader_still_reads_their_own(self) -> None:
+        reference = self.upload_as_alice()
+
+        response = self.client.get(
+            f"/v1/evidence/{reference}",
+            headers=bearer(
+                subject="alice", roles=["customer"], customer_id="customer-alice"
+            ),
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(PNG, response.content)
+
+    def test_an_operator_reviewing_the_case_still_sees_the_photograph(self) -> None:
+        """The console's path: a customer files it, a human decides on it."""
+
+        reference = self.upload_as_alice()
+
+        response = self.client.get(
+            f"/v1/evidence/{reference}",
+            headers=bearer(subject="local-demo-operator", roles=["operator"]),
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(PNG, response.content)
+
+    def test_an_unbound_agent_cannot_read_a_customers_photograph(self) -> None:
+        reference = self.upload_as_alice()
+
+        response = self.client.get(
+            f"/v1/evidence/{reference}",
+            headers=bearer(
+                subject="agent-bot", roles=["agent"], agent_id="agt_refund_01"
+            ),
+        )
+
+        self.assertEqual(404, response.status_code)
+
+    def test_a_refusal_looks_exactly_like_an_unknown_reference(self) -> None:
+        """Otherwise the status code confirms that a reference exists."""
+
+        reference = self.upload_as_alice()
+        mallory = bearer(
+            subject="mallory", roles=["customer"], customer_id="customer-mallory"
+        )
+
+        refused = self.client.get(f"/v1/evidence/{reference}", headers=mallory)
+        unknown = self.client.get(
+            "/v1/evidence/ev_deadbeefdeadbeefdeadbeefdeadbeef", headers=mallory
+        )
+
+        self.assertEqual(refused.status_code, unknown.status_code)
+        self.assertEqual(refused.json(), unknown.json())
