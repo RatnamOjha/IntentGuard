@@ -1,355 +1,280 @@
-# ADR 006: A compensation floor, and falling back when the budget is exhausted
+# ADR 006: One proposed remedy, enforced compensation bounds, and recorded alternatives
 
-- Status: **Proposed — design only, nothing implemented.** Five decisions need
-  sign-off; decision 1 changes what kind of authority IntentGuard asserts and
-  should be read first
-- Date: 2026-09-22
-- Extends the claim/remedy model added in `cb24a67` / `d0c186d`
-- Does not alter ADR 004 (tenancy) or ADR 005 (persistence)
+- Status: Accepted design direction; required-claim omission fixed in ADR 008,
+  remaining implementation pending
+- Created: 2026-09-22
+- Revised: 2026-10-21
+- Replaces this ADR's original review-threshold and recursive-fallback proposal
+- Depends on tenant isolation and per-company policy from ADR 004
+- Persistence work remains governed by ADR 005
 
-## Context
+## Context and current implementation
 
-Stage 0 closed on 22 September with the wedge confirmed and restated. The
-problem is not "AI agents issuing refunds". It is **the wrong amount**, in
-either direction, when an agent settles a case autonomously. As the buyers put
-it:
+The product controls incorrect compensation in either direction when an AI
+support agent proposes a settlement. It must respect the company's policy,
+customer consent, agent authority, and available budgets.
 
-1. Given the circumstances of a case, determine the appropriate compensation.
-2. Do not overcompensate.
-3. **Do not undercompensate.**
-4. Respect daily and company-level refund limits.
-5. **When the refund budget is exhausted, fall back to an alternative remedy** —
-   e.g. a discount on the next purchase, sized from the eligible refund amount.
+The current implementation has ceilings, one claim-selected `Remedy(kind, cap)`,
+and per-agent daily budgets. It has no compensation floor, alternative-remedy
+set, remedy-specific budget pots, shared company ceiling, or customer-dispute
+workflow. Organization identity exists, but governance repositories and the
+published policy remain shared. These are implementation gaps, not guarantees
+established by accepting this document.
 
-Rules 1, 2 and 4 are what the engine already is. Rules 3 and 5 have no
-representation in it, and neither is a small addition. This ADR defines both
-before any code is written.
+The refund desk submits structured claims. At the restart review,
+`GovernedAgent` did not: its proposal type had no claim and its actions skipped
+claim-specific rules. [ADR 008](008-required-refund-claim-context.md) closes that
+omission for refund settlements and carries model claims through shared
+validation. Independent verification of merchant facts remains unimplemented.
 
-### What the engine does today
+The 30-second default in `PolicyEngine.authorize_action` is an execution lease
+and internal budget-reservation lifetime. It is not a bank hold or an offer
+acceptance deadline. Human approval currently waits without a reservation and
+re-evaluates before issuing fresh authority. A future customer-choice workflow
+could use that separation too; guaranteed offers would need additional design.
 
-Every control is a ceiling. `authorization.rego:132`:
+## 1. The agent proposes one remedy
 
-```rego
-effective_cap := min([policy_remedy.cap, input.agent.max_action_amount, input.intent.max_amount])
+Use Model A for the first complete refund workflow. The agent proposes one
+remedy and amount; the engine authorizes only that exact proposal. The ordinary
+path is proposal, authorization, protected execution, and outcome recording.
+The engine never silently substitutes a different action or changes the amount.
+
+Policy also enumerates the alternatives for the case. They support audits and
+human review, without becoming a customer-facing choice menu. Model B is deferred
+because it adds offer state, acceptance, expiry, and customer experience work,
+not because a short execution lease makes it impossible.
+
+An authorization is not proof of payment or proof that a customer saw an offer.
+The connector records execution outcomes; the customer-facing integration must
+record what was actually communicated. Customer dissatisfaction opens a case for
+human review, including after a completed settlement.
+
+## 2. Separate compensation from authority and funding
+
+For each policy-eligible remedy, compute a compensation interval from the
+organization's versioned policy and the facts required by that policy:
+
+```text
+policy_floor <= proposed_amount <= policy_cap
+
+authority_cap = min(policy_cap, agent_action_limit, matching_intent_limit)
+fundable_cap  = min(authority_cap, applicable_budget_headroom)
 ```
 
-and the governing property, stated in `models.RefundClaim`:
+The last expression is only an availability observation until an atomic
+reservation succeeds. The budget dimension and monetary currency must match.
 
-> *a claim may narrow the remedy, never widen it*
+Do not reduce `policy_floor` because the agent has a small spending limit or
+because a budget is nearly empty. If `policy_floor > fundable_cap`, there is no
+currently fundable autonomous settlement for that remedy. Escalation is the
+result; reducing the customer's policy entitlement is not.
 
-`Remedy` carries `kind` and a single `cap`. `Decision` is `ALLOW | DENY |
-REVIEW`. Budget exhaustion is terminal — `DAILY_BUDGET_EXCEEDED`
-(`policy_engine.py:673`) is a blocking finding, and the response says what was
-refused, not what could be offered instead.
+A floor narrows the set of payments the agent may execute. It does not raise a
+ceiling or require the engine to issue a payment. The previous version's claim
+that enforcing a floor inherently forces spending is withdrawn.
 
-So the engine can currently answer *"may this much leave?"* and cannot answer
-either *"was that too little?"* or *"what else could we do?"*.
+No default such as `floor = 0.5 * effective_cap` is adopted. An agent's spending
+limit is not a measure of appropriate compensation. Exact thresholds and claim
+rules must come from the merchant's policy, with explicit policy versions.
 
----
+### Trusted facts and omitted claims
 
-## 1. What "do not undercompensate" actually means
+Agent claims remain assertions. Merchant order value, prior compensation,
+delivery facts, evidence verification, and any customer-request exception need
+identified sources when policy relies on them. A photo reference by itself is
+not verified evidence of a defect.
 
-This is the decision that matters, and it is not symmetrical with
-overcompensation.
+Refund actions subject to remedy policy must not opt out by omitting a claim.
+Missing required context must produce a non-executable result. When required
+facts cannot be verified, escalate for evidence resolution; do not silently
+fall back to ceilings-only authorization.
 
-**Refusing to overpay withholds authority. Requiring a minimum asserts an
-obligation to pay.** Today IntentGuard can only ever reduce what leaves the
-company; every failure mode is "less money moved than the agent wanted". A
-floor makes the engine the reason money leaves — and a bug in a floor is a bug
-that *spends*. That is a different product, legally and operationally, and it
-deserves to be named rather than absorbed as "one more rule".
+An agent assertion that "the customer asked for less" cannot suppress the
+floor. Any such exception must be explicitly permitted by merchant policy and
+supported by authenticated customer input. The engine must not infer consent
+to store credit from consent to a cash refund.
 
-Three readings of rule 3 were considered. They are not variations; they are
-different products.
+### Monetary representation
 
-### Reading A — a hard floor the engine enforces (**rejected**)
+Use exact decimal values or integer minor units throughout policy evaluation,
+including the OPA boundary. The current conversion of `Decimal` to `float` is
+not the contract for the new compensation bounds. Quantize computed lower
+bounds upward and upper bounds downward to the currency's supported minor unit;
+if they cross, the interval is infeasible. Reject unsupported currencies rather
+than assuming two decimal places. This requires implementation and boundary tests.
 
-The engine returns `DENY` when the proposed amount is *below* a computed
-minimum, forcing the agent to offer more.
+## 3. Action decisions and case escalation are separate
 
-Rejected, for three reasons.
+Keep one action decision: `ALLOW`, `DENY`, or `REVIEW`. A separate case-escalation
+record states why a person needs to look. Do not return two simultaneous action
+decisions or reuse an approval of a risky payment to override a hard constraint.
 
-*It breaks the narrowing property.* The floor would have to be computed from
-the claim, and the claim is an agent assertion. An agent wanting to force a
-larger settlement asserts a more serious claim — which is precisely the
-self-service escalation `RefundClaim`'s docstring exists to prevent. The
-asymmetry that makes agent-supplied claims safe is that they can only ever
-reduce. A floor derived from them removes it.
-
-*It makes refusal incoherent.* A `DENY` today means "this must not happen". A
-`DENY` for undercompensation means "this must happen, but bigger" — the agent's
-only correct response is to re-propose a *larger* payment, so the engine's
-refusal becomes an instruction to spend. Nothing in the decision vocabulary,
-the audit trail or the console reads that way.
-
-*It is unsafe under exactly the conditions it is meant for.* If a floor is
-enforced and the budget is exhausted, the two rules contradict: rule 3 demands
-at least X, rule 4 forbids any X. Something must give, and an engine that can
-be talked into either violating a budget or blocking every settlement is worse
-than one that does neither.
-
-### Reading B — a floor as an advisory signal (**rejected**)
-
-Return `ALLOW` but attach a non-blocking finding saying the settlement looks
-low.
-
-Rejected as the worst of both: it creates the obligation in the audit trail —
-"the system said this was too little and it was paid anyway" — while enforcing
-nothing. That is a liability record, not a control.
-
-### Reading C — undercompensation is a *review* trigger, not a denial (**chosen**)
-
-> **A proposal materially below the remedy policy would have permitted routes
-> to human review. The engine never requires a payment; it requires a human
-> when an agent settles unusually low.**
-
-This is chosen because it keeps every property the current design rests on:
-
-- **The narrowing rule survives untouched.** A richer claim still cannot
-  increase what may be paid. It can only make an unusually small settlement
-  more conspicuous, and the outcome of conspicuousness is a person looking, not
-  money moving.
-- **The decision vocabulary already has the right word.** `REVIEW` means "a
-  human must decide", which is exactly the correct response to "this agent is
-  offering £5 on a £200 defect claim". No new decision value is needed.
-- **It cannot contradict the budget.** Review is orthogonal to funds; an
-  exhausted budget and a low settlement can both be true and the case simply
-  goes to a person.
-- **It matches what the buyers described.** The fear is an agent quietly
-  settling cases badly and nobody noticing. A queue entry answers that; a forced
-  payment does not.
-
-**The floor is therefore a detection threshold, not an obligation.** It is
-worth being blunt in the documentation: IntentGuard does not guarantee
-customers are compensated enough. It guarantees a human sees the cases where
-they may not have been.
-
-### The threshold
-
-`REMEDY_MATERIALLY_BELOW_POLICY`, raised when:
-
-```
-proposed_amount < floor_ratio × effective_cap
-```
-
-with `floor_ratio` per-organisation policy (proposed default `0.5`), and the
-finding suppressed entirely when:
-
-- `effective_cap` is zero (nothing was permitted, so nothing is low), or
-- the proposal exactly matches a lower remedy the policy itself named — an
-  agent correctly offering `shipping_refund` is not undercompensating, it is
-  complying, or
-- the customer asked for less than policy permits, where that is representable.
-
-The last exclusion matters and is currently **not representable**: the engine
-has no field for "what the customer asked for". Without it, an agent honouring
-a customer's modest request is indistinguishable from an agent shortchanging
-them. See open question 1.
-
----
-
-## 2. Falling back when the refund budget is exhausted
-
-Rule 5 asks for something the model cannot express: *deny the refund, but allow
-a different remedy, sized from the refund that was eligible.*
-
-Today `DAILY_BUDGET_EXCEEDED` is blocking and the response carries no
-alternative. The remedy ladder that already exists — `refund_to_source` →
-`store_credit` → `shipping_refund` → `none` — is selected by the **claim**, not
-by **budget state**, so nothing currently degrades.
-
-### The shape chosen
-
-> **`Remedy` gains an optional `fallback`. When a blocking finding is one the
-> ladder can degrade past, the decision stays `DENY` for the proposed action
-> and carries a fully-specified alternative the agent may propose instead.**
-
-```
-Remedy(
-    kind=REFUND_TO_SOURCE, cap=200.00,
-    fallback=Remedy(kind=STORE_CREDIT, cap=100.00, fallback=None),
-)
-```
-
-Three properties this must hold, and they are the whole design:
-
-**The fallback is an envelope, not an instruction.** Identical to the existing
-`Remedy` contract — it says what *would* be permitted, and the agent must come
-back with a new `ActionRequest` proposing it. The engine never issues a
-settlement the agent did not ask for. Anything else makes IntentGuard the payer
-rather than the authorizer.
-
-**A fallback is computed under every constraint the original was.** It is
-min'd with `agent.max_action_amount` and `intent.max_amount` exactly as
-`effective_cap` is. A degraded remedy must never be a route to an amount the
-original could not have reached — otherwise "exhaust the refund budget" becomes
-an escalation technique.
-
-**Store credit is not free.** This is the trap in rule 5 and the reason it
-needs an ADR rather than a patch. A next-purchase discount is a real liability;
-it is simply a *different* one, drawn against a different pot. If credit is
-issued without a budget of its own, "refund budget exhausted" becomes a bypass
-of the only spending control the product has, and an agent that wants to keep
-settling need only exhaust the refund budget first. **A fallback remedy must be
-reserved against its own ledger**, or the daily cap means nothing after the
-first exhaustion. See decision 4.
-
-### Which findings may degrade, and which may not
-
-Not every refusal has a lesser form. Degrading past the wrong one converts a
-control into a suggestion.
-
-| Blocking finding | Degrades? | Why |
+| Situation | Action result | Case handling |
 |---|---|---|
-| `DAILY_BUDGET_EXCEEDED` | **Yes** | Funds for *this* remedy are out; the claim is still valid |
-| `REMEDY_CAP_EXCEEDED` | **Yes**, to the cap | Policy named a smaller figure; offering it is compliance |
-| `AGENT_ACTION_LIMIT` | **Yes**, to the limit | Same shape — authority exists, at a lower number |
-| `REMEDY_NOT_PERMITTED` | **Yes** | Policy already names the permitted remedy |
-| `CLAIM_NOT_RECOGNISED` | **No** | Nothing about the claim was authorised at all |
-| `INTENT_CUSTOMER_MISMATCH` | **No** | The caller is not who they claim; degrade nothing |
-| `AGENT_REVOKED`, fleet stop | **No** | The kill switch has no lesser form. Ever |
-| `INTENT_EXPIRED` | **No** | Authority has lapsed; a smaller lapsed authority is still lapsed |
-| Risk-driven `REVIEW` | **No** | Already a human's decision, not a funding problem |
+| In range, authorized, funded, below review thresholds | ALLOW with one reservation and lease | Record the proposal and outcome |
+| In range and otherwise valid, but risk requires approval | REVIEW without funds held | Existing approval flow, revalidated on approval |
+| Below the policy floor | DENY, `REMEDY_BELOW_FLOOR` | Escalate undercompensation; no payment |
+| Above the cap or wrong remedy | DENY with the relevant constraint | Record alternatives; any correction is a new proposal |
+| No candidate can meet its floor and funding constraints | DENY, `NO_FUNDED_REMEDY` | Escalate with each candidate's blockers |
+| Required claim context is absent or unverified | DENY with a typed context finding | Resolve evidence before a new proposal |
+| Customer disputes an offer or completed settlement | Existing decision remains historical | Open a dispute linked to the case and original action |
 
-The rule behind the table: **degrade only when authority exists and the
-constraint is quantitative.** Where the refusal is about *identity, validity or
-revocation*, there is nothing to degrade to.
+The new finding names and escalation fields are proposed contracts, not existing
+API fields. Human escalation must be durable and deduplicated per case/reason;
+repeated agent submissions must not create an unbounded queue of duplicate cases.
 
-### How the discount is calculated
+A reviewer can resolve facts or propose another settlement within their own
+verified authority. They cannot approve a denied action through the existing
+risk-approval endpoint. Any policy exception needs an explicit, attributable
+policy change or separately designed exception authority; none is implicit here.
+A follow-up payment must account for compensation already issued on the case.
 
-The buyers' example is "a 50% discount on the next purchase, based on the
-eligible refund amount". Written out:
+If case escalation cannot be persisted, the action stays non-executable and the
+integration receives an operational failure. Do not claim a human was notified
+merely because an audit event was written. Slack delivery is separate work.
 
-```
-eligible        = effective_cap of the ORIGINAL remedy
-                  (already min'd with agent limit and intent)
-fallback_cap    = min(
-                      fallback_ratio × eligible,       # 0.5 by default, per-org
-                      fallback_remedy_policy_cap,      # the ladder's own cap
-                      agent.max_action_amount,
-                      intent.max_amount,
-                      remaining_fallback_budget        # its own ledger, decision 4
-                  )
-```
+## 4. Record alternatives without reserving them
 
-`eligible` is deliberately the **pre-budget** cap, not the remaining budget.
-The discount is sized by what the customer was *owed*, which is the buyers'
-stated intent, and not by how much happened to be left in the pot — otherwise
-the last customer of the day gets a worse offer than the first for reasons that
-have nothing to do with their case.
+Replace the proposed recursive fallback with a finite, policy-ordered collection
+of remedy assessments. Each remedy appears once. The assessment separates:
 
-`fallback_ratio` being below 1.0 is what makes this cheaper than the refund it
-replaces, which is the commercial point. It is policy, per organisation, and
-should be expressible per claim reason.
+- policy eligibility and compensation floor/cap;
+- the agent and matching customer intent's authority;
+- funding available at evaluation time;
+- blockers and human-review requirements.
 
----
+The set is complete relative to that policy version and the recorded facts. It
+is not a statement that every possible business remedy was considered or that
+agent-supplied facts are true.
 
-## 3. When neither the preferred remedy nor the alternative is available
+For an authorized caller and valid case, persist the assessment with the selected
+proposal, evaluation time, policy version, fact references/provenance, currency,
+and relevant budget scopes. Record the later reservation outcome separately:
+a budget race may invalidate the availability observed during evaluation.
 
-The case you asked to have pinned down, and the one most likely to be reached
-in production — a busy day where both pots are empty.
+Call the subset meeting all execution prerequisites **available at evaluation
+time**, not "reserved" or "guaranteed". Only the selected proposal reserves
+budget. Alternatives consume no funds and confer no execution capability.
+On escalation, display the historical assessment and a newly evaluated one,
+clearly distinguished. Never rewrite the historical decision to reflect today.
 
-**The decision is `DENY`, with an explicit and typed statement that nothing is
-available, and escalation to human review rather than silence.**
+Use typed reason codes and identifiers, not raw complaint text in the immutable
+audit record. Operator-visible alternatives follow organization and case access
+controls. Identity/ownership failures do not expose another customer's options;
+fleet stop or revocation produces no executable fallback. An unavailable policy
+or state store fails closed, never a partial set presented as complete.
 
-Specifically:
+The audit can identify systematic low offers. Customer take-up of alternatives
+requires actual offer-and-choice observations and cannot be inferred from this
+record alone. Missing customer complaints are not proof of satisfaction.
 
-1. The ladder is walked to exhaustion. `Remedy.fallback` is `None` and
-   `kind` is `NONE` with `cap` zero.
-2. A distinct finding is raised — `NO_REMEDY_AVAILABLE` — carrying a typed
-   `FindingContext`, never prose, naming which ladder rungs were attempted and
-   which constraint stopped each. An operator must be able to read "refund:
-   daily budget exhausted; credit: credit budget exhausted" without decoding it.
-3. **The case is routed to human review**, not merely refused. A customer with
-   a valid claim and no available remedy is a business problem, not a policy
-   outcome, and it is exactly the case a support lead needs to see. This is a
-   `REVIEW` *alongside* the denial of the proposed action — the agent is told
-   no, and a human is told why.
-4. The audit event records the full attempted ladder, so "we ran out of money
-   on the 14th and these 40 customers got nothing" is reconstructable.
+## 5. Each remedy consumes an explicitly defined budget
 
-**Deliberately excluded:** any notion of borrowing against tomorrow's budget,
-queuing the settlement for automatic retry, or partial payment of what remains.
-Each converts a refusal into a deferred commitment, and the product's core claim
-is that a refusal is final and legible. A human may choose to do any of those;
-the engine may not do them unattended.
+Credit is a liability, not a free fallback. Model a budget pot as a ledger scope
+with organization, currency, period, and an explicit remedy-to-pot mapping.
+A pot is not a separate physical database. Cash refund and shipping refund may
+share a cash pot; credit has its own configured liability pot. Every executable
+remedy must map to a controlled pot.
 
----
+Enforce applicable agent, pot, and company-wide caps together. Reservation must
+atomically satisfy every applicable cap, or leave no hold in any scope. Release,
+expiry, and commit resolve all scopes consistently; changing remedy cannot
+reset the company's total exposure or an agent's existing spend.
 
-## 4. Decisions requiring sign-off
+For the first version, charge cash and fixed-value store credit at face value in
+the same currency. Do not assume credit costs less than its face value merely
+because some customers might not redeem it. Do not aggregate currencies without
+an explicit conversion policy.
 
-**Decision 1 — undercompensation is a review trigger, never a denial.**
-The engine never requires a payment. It requires a human when a settlement is
-materially below what policy would have permitted. Accepting this means
-accepting plainly that *IntentGuard does not guarantee customers are paid
-enough* — it guarantees a person sees the cases where they may not have been.
-Reject this and we are building reading A, which breaks the narrowing property.
+A percentage discount on a future basket is a different instrument. It needs a
+maximum liability and redemption rules; it is deferred rather than disguised as
+fixed-value store credit. Policy may define a fixed credit amount derived from
+a verified eligible refund amount, but no universal 50% ratio is selected.
 
-**Decision 2 — `Remedy` gains an optional recursive `fallback`.**
-An envelope, never an instruction; the agent must re-propose. Capped under
-every constraint the original was.
+The funding snapshot is advisory; the ledger's conditional atomic write is the
+spending authority. If a reservation loses a race, deny that proposal and record
+the funding failure. Do not automatically settle with the next alternative.
 
-**Decision 3 — only quantitative refusals degrade.**
-Per the table in §2. Revocation, fleet stop, identity mismatch and expiry have
-no lesser form.
+## 6. Switching remedies requires fresh authority
 
-**Decision 4 — a fallback remedy requires its own budget ledger.**
-Without it, exhausting the refund budget is a bypass of the only spending
-control the product has. This is the largest implementation item in the ADR: it
-means a second ledger dimension keyed by remedy kind, not a single
-`daily_budget` per agent. **If this is rejected, rule 5 should not be built at
-all** — an uncapped fallback is worse than no fallback.
+A different remedy is a different action, submitted with a new request ID and a
+link to the same case and previous proposal. It must pass every check anew:
+identity, action permission, matching signed intent, current policy, evidence,
+compensation bounds, risk, budgets, revocation, and fleet status.
 
-**Decision 5 — exhausting the ladder escalates as well as denies.**
-`NO_REMEDY_AVAILABLE`, typed context naming each rung and its blocker, routed to
-review.
+Today an intent names exactly one action. A refund intent cannot be relabeled
+as credit consent. If no matching intent exists, the alternative is marked as
+requiring consent and cannot execute. Extending signed consent to a set of
+remedies would be a separate trust-boundary decision.
 
----
+An outstanding hold on a superseded proposal must be resolved before replacing
+it. Request-ID idempotency does not prevent settling the same order twice with
+two new IDs: the complete refund workflow also needs trusted case/order binding
+and cumulative compensation accounting before handling real payments.
 
-## 5. Open questions
+Keep the 30-second execution default for now. Do not lengthen it to accommodate
+human deliberation. Real connector work must explicitly handle expiry and
+ambiguous provider outcomes; a provider timeout is not proof no payment occurred.
 
-1. **What the customer asked for is not representable.** The undercompensation
-   check needs to distinguish "the agent shortchanged them" from "they asked for
-   less". `RefundClaim` has no field for a requested amount, and adding one
-   raises its own question: it would be agent-supplied, so it can only ever be
-   used to *suppress* a review, never to raise a cap. That is a safe direction,
-   but it is one more agent-controlled input and wants its own review.
+## Alternatives and consequences
 
-2. **Does `floor_ratio` belong in Rego or in config?** It is per-organisation
-   policy, which argues Rego — but per-company policy does not exist yet
-   (`policy.py` has no `org_id`). This ADR should land *after* per-company
-   policy, or the floor is global and the feature is half-built.
+- **Customer chooses a guaranteed funded menu:** deferred; requires offer and
+  reservation semantics beyond this first workflow.
+- **Advisory low-compensation warnings on ALLOW:** rejected; the proposed
+  settlement could still execute outside the configured range.
+- **Review threshold derived from the effective spending cap:** replaced;
+  tightening an agent's authority must not lower appropriate compensation.
+- **Reserve all alternatives:** rejected; unchosen options would consume budget.
+- **Recursive fallback:** replaced by explicit assessments, making every
+  candidate and blocker auditable without implying automatic execution.
+- **Rewrite the backend language:** unnecessary for this feature; see ADR 007.
 
-3. **Currency.** `fallback_ratio × eligible` produces fractional minor units.
-   Rounding direction is a commercial decision — rounding up favours the
-   customer and is the safer default against rule 3, but it must be stated, not
-   inherited from `Decimal`'s context.
+This work is a policy-model, ledger, case-workflow, API, and console change. It
+is not just an audit-schema extension. Per-company policy and tenant isolation
+must be in place before exposing these assessments to multiple organizations.
 
-4. **Does the built-in evaluator implement any of this?** Per Decisions §I the
-   built-in evaluator may never be more permissive than Rego. A built-in
-   evaluator that omits fallbacks is *stricter*, so it satisfies the invariant
-   — but the 19-case matrix will need cases proving the fallback path cannot
-   widen anything, or the invariant is being asserted over untested ground.
+## Delivery and verification
 
----
+Implement in separately reviewable changes:
 
-## Verification
+1. Close optional-claim omission on governed refund paths, including chat;
+   document and test the required-context boundary.
+2. Complete organization-scoped repositories and published policy, with shared
+   connection pools. Replace whole-history state loading before volume rollout.
+3. Add exact-money remedy intervals and the finite assessment model to both
+   evaluators and persistence codecs. Select business thresholds from merchant
+   policy, not demonstration values.
+4. Add budget scopes and atomic multi-scope reservations before enabling funded
+   alternatives. Retain existing idempotency and revocation protections.
+5. Add durable case escalation, historical/current alternatives in the console,
+   and protected refund execution with outcome reconciliation.
 
-Done when, and each covered by a test:
+Acceptance tests must prove:
 
-- a proposal materially below `effective_cap` returns `REVIEW`, never `DENY`,
-  and never alters the cap;
-- a richer claim cannot raise a floor into forcing a larger payment — the
-  narrowing property holds with the floor present, asserted adversarially;
-- an exhausted refund budget returns `DENY` carrying a fully-specified
-  `store_credit` fallback, and the agent's re-proposal at the fallback cap is
-  allowed;
-- a fallback is refused when it would exceed `agent.max_action_amount` or
-  `intent.max_amount`, proving degradation is not an escalation route;
-- a fallback reserves against its own ledger, and exhausting the refund budget
-  does not grant unlimited credit;
-- `AGENT_REVOKED` and a fleet stop produce **no** fallback, asserted explicitly;
-- both pots exhausted yields `NO_REMEDY_AVAILABLE` with typed context naming
-  each rung and its blocker, plus a review entry;
-- the permissiveness invariant still holds across both evaluators with
-  fallbacks present.
+- omitting required claim context cannot produce a refund lease through either
+  direct authorization or the agent path;
+- amounts below the floor and above the cap cannot execute; equality at valid
+  boundaries passes all other checks normally;
+- reducing authority or available budget below the policy floor escalates
+  without reducing that floor;
+- agent assertions cannot widen trusted authority, forge fact provenance, or
+  suppress a floor through a claimed customer preference;
+- each policy-eligible remedy is assessed with typed blockers, and only the
+  selected remedy reserves funds;
+- consent to one action does not authorize another remedy;
+- a funding race cannot exceed agent, pot, or company caps or leave partial holds;
+- revocation, fleet stop, identity failure, and dependency failure cannot yield
+  an executable fallback;
+- risk approval cannot override a floor, missing context, or a budget refusal;
+- dispute/escalation records survive restart and remain isolated by tenant;
+- a historical assessment remains unchanged when current funding differs;
+- new case submissions and remedy switches cannot duplicate compensation;
+- monetary boundaries remain exact through Rego, JSON, and database round trips;
+- both evaluators satisfy the tested permissiveness invariant for the supported
+  policy configurations. A fixed test matrix is not a proof for arbitrary
+  merchant-authored Rego; production must use the configured policy authority.
+
+The design revision itself changed no runtime behavior. Implementation slices
+are recorded separately, starting with ADR 008. Missing implementation must
+remain visible in the workflow and release notes until verified.

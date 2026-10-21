@@ -159,6 +159,7 @@ export type ApiAgentTurn = {
     currency: string;
     rationale: string;
     risk_score: number;
+    claim: ApiClaim | null;
   } | null;
   authorization: ApiAuthorization | null;
 };

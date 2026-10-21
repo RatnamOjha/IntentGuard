@@ -39,3 +39,26 @@ test_revoked_agent_is_denied if {
 test_stopped_fleet_is_denied if {
 	decision.decision == "deny" with input as object.union(base, {"fleet_stopped": true})
 }
+
+# Exercise OPA directly too: absence of the entire claim object must fail closed,
+# not just the Python-normalized {"known": false} input.
+test_refund_actions_require_claims if {
+	every action in {"refund_order", "refund_shipping", "issue_goodwill_credit"} {
+		request := object.union(base.request, {"action": action})
+		agent := object.union(base.agent, {"allowed_actions": [action]})
+		intent := object.union(base.intent, {"action": action})
+		input_doc := object.union(base, {"request": request, "agent": agent, "intent": intent})
+		result := decision with input as input_doc
+		result.decision == "deny"
+		some finding in result.findings
+		finding.code == "CLAIM_REQUIRED"
+	}
+}
+
+test_null_claim_cannot_bypass_refund_policy if {
+	request := object.union(base.request, {"action": "refund_order"})
+	result := decision with input as object.union(base, {"request": request, "claim": null})
+	result.decision == "deny"
+	some finding in result.findings
+	finding.code == "CLAIM_REQUIRED"
+}

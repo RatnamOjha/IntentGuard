@@ -408,12 +408,15 @@ class AgentEndpointTest(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         return response.json()
 
-    def test_a_compliant_request_is_allowed(self) -> None:
+    def test_a_refund_without_claim_context_is_denied(self) -> None:
         body = self._say("issue a refund for 380")
 
-        self.assertEqual("allow", body["decision"])
+        self.assertEqual("deny", body["decision"])
+        self.assertIn("CLAIM_REQUIRED", {
+            finding["code"] for finding in body["authorization"]["decision"]["findings"]
+        })
         self.assertEqual("scripted", body["planner"])
-        self.assertIsNotNone(body["authorization"]["lease"])
+        self.assertIsNone(body["authorization"]["lease"])
         self.assertEqual("scripted-v2", body["trace"]["model"])
         self.assertEqual("scripted-rules-v2", body["trace"]["prompt_version"])
         self.assertNotIn("refundable hotel", str(body["trace"]))

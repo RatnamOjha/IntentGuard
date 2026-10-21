@@ -75,6 +75,13 @@ blocking contains {"code": "INTENT_ATTRIBUTE_MISMATCH", "message": sprintf("The 
 # min'd with the ceilings that already applied, which is what keeps an agent's
 # own account of the complaint from becoming a permission escalation.
 
+# Missing or null context must not select the older ceilings-only path.
+# Keep this action set aligned with models.CLAIM_REQUIRED_ACTIONS.
+blocking contains {"code": "CLAIM_REQUIRED", "message": "This action requires a claim with the reason, order value, and days since delivery. No settlement was authorized.", "blocking": true} if {
+	input.request.action in {"refund_order", "refund_shipping", "issue_goodwill_credit"}
+	not input.claim.known == true
+}
+
 has_evidence(kind) if kind in input.claim.evidence
 
 # What the proposed action would pay out with. An action that settles nothing

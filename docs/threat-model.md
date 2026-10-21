@@ -24,6 +24,7 @@ Each control below is held open by a named test in
 | Rewriting decision history | SHA-256 hash chain. Payload mutation, field mutation, deletion of a middle event, and reordering are all detected; `first_invalid_link()` names where the chain breaks. | `AuditChainTamperingTest` |
 | Deleting the newest events to hide an attack | The expected length and head hash are held in a checkpoint outside the chain, so truncation -- which a bare hash chain cannot see -- is rejected. | `AuditChainTamperingTest` |
 | Prompt injection causing direct execution | The model has one proposal-only tool. Its output is schema validated and always evaluated by the deterministic policy engine; the 12-case LLM evaluation includes direct, indirect, override, cross-customer, and multi-turn attacks. | `LlmEvaluationTest`, `InjectedInstructionTest` |
+| Omitting refund context to skip remedy policy | Refund, shipping-refund, and goodwill-credit proposals require a structured claim. Both evaluators deny omission; Python also guards older published Rego results. HTTP and model claims share validation. No lease, budget hold, or risk-approval entry is created for missing context. | `RequiredClaimTest`, `RequiredClaimRegoTest` in `tests/test_required_claims.py` |
 
 ## What it does not defend against
 
@@ -59,6 +60,12 @@ Blunt list. These remain outside the controls implemented today.
   (see `PolicyEngine.RISK_WEIGHT_*`). It is not a trained model and has no
   counterparty reputation, device, or cross-agent context. It bounds what the
   agent can hide, not what a well-resourced attacker can construct.
+- **False claim facts or evidence citations.** Required claim context closes
+  omission, not fabrication. Merchant order values, delivery facts, and cited
+  photographs are not independently verified by the current authorization path.
+  Agent/intent/budget ceilings still apply; the system cannot yet guarantee that
+  a structurally valid claim is truthful or that its remedy is appropriate to
+  the real order. ADR 006 tracks trusted fact provenance and compensation bounds.
 - **Identity-provider compromise.** Agent and customer IDs are taken from
   signed token claims and checked against submitted resource IDs. A stolen
   token or compromised signing key can still impersonate its subject until the

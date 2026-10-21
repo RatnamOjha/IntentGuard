@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
   "scenarios": [
+    {"id": "correctness-refund-claim-context", "category": "correctness", "requirement": "refund_claim_context", "test": "tests.test_required_claims.RequiredClaimTest.test_missing_claim_denies_each_refund_action_even_at_high_risk"},
+    {"id": "security-chat-claim-omission", "category": "security", "requirement": "refund_claim_context", "test": "tests.test_required_claims.RequiredClaimTest.test_model_chat_cannot_skip_claim_rules"},
+    {"id": "reliability-legacy-policy-claim-guard", "category": "reliability", "requirement": "refund_claim_context", "test": "tests.test_required_claims.RequiredClaimRegoTest.test_previously_published_policy_cannot_allow_missing_claim"},
     {"id": "correctness-policy-allow", "category": "correctness", "requirement": "policy_decision_accuracy", "test": "tests.test_policy_engine.PolicyEngineTest.test_allows_compliant_action"},
     {"id": "correctness-intent-ceiling", "category": "correctness", "requirement": "intent_matching", "test": "tests.test_policy_engine.PolicyEngineTest.test_denies_action_outside_customer_intent"},
     {"id": "correctness-intent-attributes", "category": "correctness", "requirement": "intent_matching", "test": "tests.test_policy_engine.PolicyEngineTest.test_denies_attribute_mismatch"},

@@ -86,6 +86,10 @@ def action(request_id: str = "request-01") -> dict:
         "intent_id": "intent-01",
         "risk_score": 10,
         "attributes": {},
+        "claim": {
+            "reason": "defect", "order_value": "1500", "days_since_delivery": 1,
+            "artifacts": [{"kind": "photo", "reference": "tenancy-fixture-photo"}],
+        },
     }
 
 
