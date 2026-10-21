@@ -36,11 +36,13 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .claims import ClaimPayload
 from .models import (
     ActionRequest,
     AuthorizationResult,
     Decision,
     IntentPassport,
+    RefundClaim,
 )
 from .policy_engine import PolicyEngine
 
@@ -154,6 +156,7 @@ class ProposalPayload(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     risk_score: int = Field(default=0, ge=0, le=100)
     rationale: str = Field(min_length=1, max_length=500)
+    claim: ClaimPayload | None = None
 
     @field_validator("amount")
     @classmethod
@@ -175,6 +178,7 @@ class ProposedAction:
     attributes: dict[str, Any] = field(default_factory=dict)
     # Advisory only. The engine derives its own score and takes the higher.
     risk_score: int = 0
+    claim: RefundClaim | None = None
 
 
 @dataclass(frozen=True)
@@ -359,7 +363,7 @@ class ScriptedPlanner:
 class ChatCompletionsPlanner:
     """Plans actions with any OpenAI-compatible chat-completions provider."""
 
-    PROMPT_VERSION = "financial-proposal-v3"
+    PROMPT_VERSION = "financial-proposal-v4"
     RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
     SYSTEM_PROMPT = (
@@ -378,7 +382,16 @@ class ChatCompletionsPlanner:
         "request from the control that exists to judge it.\n\n"
         "You may only cite an intent_id from the list you are given; those are "
         "the authorizations this customer has actually granted. Never invent "
-        "one. Do not claim an action succeeded unless you are told that it did."
+        "one. Do not claim an action succeeded unless you are told that it did.\n\n"
+        "For refund_order, refund_shipping, or issue_goodwill_credit, include a "
+        "structured claim only when the supplied context gives its reason, "
+        "order value, and days since delivery. The proposed amount is not "
+        "necessarily the order value. Do not invent missing facts, order IDs, "
+        "or evidence references. Cite only references actually supplied; never "
+        "infer a photo citation from a customer's description of damage. "
+        "If required facts are missing, leave claim null: IntentGuard will "
+        "deny execution and explain the missing context. Claims and citations "
+        "are assertions, not independently verified facts."
     )
 
     def __init__(
@@ -429,6 +442,8 @@ class ChatCompletionsPlanner:
 
     @staticmethod
     def _tool_schema(intents: tuple[IntentPassport, ...]) -> dict[str, Any]:
+        claim_schema = ClaimPayload.model_json_schema()
+        definitions = claim_schema.pop("$defs", {})
         return {
             "type": "function",
             "function": {
@@ -439,7 +454,16 @@ class ChatCompletionsPlanner:
                 ),
                 "parameters": {
                     "type": "object",
+                    "$defs": definitions,
                     "properties": {
+                        "claim": {
+                            "description": (
+                                "Required context for refunds and goodwill credit. "
+                                "Use null when facts are missing; never invent them. "
+                                "Evidence kinds are derived from cited artifacts."
+                            ),
+                            "anyOf": [claim_schema, {"type": "null"}],
+                        },
                         "intent_id": {
                             "type": "string",
                             "description": "Which customer authorization to act under.",
@@ -805,6 +829,7 @@ class ChatCompletionsPlanner:
             rationale=payload.rationale.strip(),
             attributes=payload.attributes,
             risk_score=payload.risk_score,
+            claim=payload.claim.to_claim() if payload.claim is not None else None,
         )
 
 
@@ -985,6 +1010,7 @@ class GovernedAgent:
             risk_score=proposal.risk_score,
             attributes=dict(proposal.attributes),
             submitted_by=submitted_by,
+            claim=proposal.claim,
         )
         result = self.engine.authorize_action(request, now=now)
         return AgentTurn(

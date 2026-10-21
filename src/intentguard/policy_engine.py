@@ -25,6 +25,7 @@ from .models import (
     AuthorizationResult,
     BudgetReservation,
     ClaimReason,
+    CLAIM_REQUIRED_ACTIONS,
     Decision,
     DecisionRecord,
     FindingContext,
@@ -52,6 +53,20 @@ _REMEDY_FOR_ACTION = {
     "refund_shipping": RemedyKind.SHIPPING_REFUND,
     "reschedule_service": RemedyKind.RESCHEDULE,
 }
+
+
+def _required_claim_finding(request: ActionRequest) -> PolicyFinding | None:
+    """A required-context guard also applies to previously published Rego."""
+    if request.claim is None and request.action in CLAIM_REQUIRED_ACTIONS:
+        return PolicyFinding(
+            code="CLAIM_REQUIRED",
+            message=(
+                "This action requires a claim with the reason, order value, "
+                "and days since delivery. No settlement was authorized."
+            ),
+            blocking=True,
+        )
+    return None
 
 
 def _claim_audit_fields(claim: RefundClaim | None) -> dict[str, Any]:
@@ -884,6 +899,23 @@ class PolicyEngine:
             },
         }
         policy = self.policy_evaluator.evaluate(policy_input)
+        # Durable installations may still have an older published policy that
+        # treats a missing claim as optional. A source-file update does not
+        # replace that policy. Enforce this context requirement at the execution
+        # boundary as well, before creating a review entry or reserving funds.
+        missing_claim = _required_claim_finding(request)
+        if missing_claim is not None:
+            policy = replace(
+                policy,
+                decision=Decision.DENY,
+                findings=tuple(
+                    finding for finding in policy.findings
+                    if finding.code not in {
+                        "CLAIM_REQUIRED", "POLICY_SATISFIED", "HUMAN_APPROVAL_REQUIRED",
+                    }
+                ) + (missing_claim,),
+                remedy=None,
+            )
         record = DecisionRecord(
             request_id=request.request_id,
             decision=policy.decision,
@@ -1937,6 +1969,9 @@ class PolicyEngine:
         """
 
         if request.claim is None:
+            missing_claim = _required_claim_finding(request)
+            if missing_claim is not None:
+                findings.append(missing_claim)
             return None
 
         permitted = _policy_remedy(

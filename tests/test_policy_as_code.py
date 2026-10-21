@@ -401,7 +401,7 @@ class ClaimFixture:
         fresh_regret = RefundClaim(ClaimReason.CHANGED_MIND, Decimal("500"), 3)
         stale_regret = RefundClaim(ClaimReason.CHANGED_MIND, Decimal("500"), 30)
         return [
-            ("no claim, inside every limit", self.request("refund_order", "380")),
+            ("missing required claim", self.request("refund_order", "380")),
             ("defect with photo, full refund",
              self.request("refund_order", "4200", claim=defect_photo)),
             ("defect with photo, over the agent's limit",
@@ -429,13 +429,15 @@ class ClaimFixture:
              self.request("issue_goodwill_credit", "900", claim=fresh_regret)),
             ("claim on an action that settles nothing",
              self.request("cancel_subscription", "100", claim=defect_photo)),
-            ("high risk", self.request("refund_order", "380", risk=90)),
+            ("high risk", self.request("refund_order", "380", risk=90, claim=defect_photo)),
             ("flagged merchant category",
              self.request("refund_order", "380",
-                          attributes={"merchant_category": "cash_equivalent"})),
-            ("large payout", self.request("refund_order", "4900")),
+                          attributes={"merchant_category": "cash_equivalent"}, claim=defect_photo)),
+            ("large payout", self.request("refund_order", "4900", claim=RefundClaim(
+                 ClaimReason.DEFECT, Decimal("4900"), 1, frozenset({"photo"})
+             ))),
             ("over the agent's per-action limit",
-             self.request("refund_order", "9000")),
+             self.request("refund_order", "9000", claim=defect_photo)),
         ]
 
 
@@ -540,9 +542,10 @@ class RemedyIsReportedTest(ClaimFixture, unittest.TestCase):
                     "not have.",
                 )
 
-    def test_a_request_without_a_claim_reports_no_remedy(self) -> None:
+    def test_a_refund_without_a_claim_is_denied_and_reports_no_remedy(self) -> None:
         request = self.request("refund_order", "380")
         for name, record in self.records(request):
             with self.subTest(engine=name):
-                self.assertEqual(Decision.ALLOW, record.decision)
+                self.assertEqual(Decision.DENY, record.decision)
+                self.assertIn("CLAIM_REQUIRED", {finding.code for finding in record.findings})
                 self.assertIsNone(record.remedy)

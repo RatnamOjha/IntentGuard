@@ -95,6 +95,14 @@ class RemedyKind(str, Enum):
     NONE = "none"
 
 
+# These actions settle refund cases and cannot bypass remedy policy by omitting
+# context. Unrelated actions (including service rescheduling) retain their own
+# contracts. The stock Rego policy mirrors this set and tests exercise every one.
+CLAIM_REQUIRED_ACTIONS = frozenset({
+    "refund_order", "refund_shipping", "issue_goodwill_credit",
+})
+
+
 class EvidenceKind(str, Enum):
     """What a cited piece of supporting material is."""
 
@@ -203,8 +211,8 @@ class ActionRequest:
     # Verified token subject that submitted the action. The policy engine uses
     # this for separation of duties when a request reaches human review.
     submitted_by: str | None = None
-    # What the agent says the complaint is. Optional so every existing caller
-    # keeps working; when absent the engine applies no claim-based rules.
+    # Required by policy for CLAIM_REQUIRED_ACTIONS. Optional in the generic
+    # model so other actions still work, and omission yields an audited denial.
     claim: RefundClaim | None = None
     occurred_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)

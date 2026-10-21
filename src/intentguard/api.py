@@ -19,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from .agent import GovernedAgent, build_planner
+from .claims import ClaimPayload
 from .abuse import (
     AbuseLimits,
     RateLimiter,
@@ -63,11 +64,8 @@ from .evidence import (
 from .models import (
     ActionRequest,
     AgentProfile,
-    ClaimReason,
-    EvidenceArtifact,
     EvidenceKind,
     IntentPassport,
-    RefundClaim,
 )
 from .observability import install_observability, observation_fields, operation_span
 from .policy_engine import PolicyEngine
@@ -322,52 +320,6 @@ class EvidenceUpload(BaseModel):
     #: store enforces on the decoded content, and exists so an oversized body
     #: is rejected before it is decoded rather than after.
     content_base64: str = Field(min_length=4, max_length=8 * 1024 * 1024)
-
-
-class EvidenceArtifactPayload(BaseModel):
-    """A citation, not an upload. The gateway never fetches the reference."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: EvidenceKind
-    reference: str = Field(
-        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:/-]+$"
-    )
-
-
-class ClaimPayload(BaseModel):
-    """The complaint behind a proposed action, as the agent describes it.
-
-    Closed enums rather than free text: a reason that reached policy as an
-    arbitrary string would be attacker-controlled input steering a decision,
-    and `extra="forbid"` means a misspelled field is a 422 rather than a
-    silently ignored constraint.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    reason: ClaimReason
-    order_value: Decimal = Field(gt=0)
-    days_since_delivery: int = Field(ge=0, le=3650)
-    #: The merchant's order or transaction id. Constrained rather than free
-    #: text: it is shown to an operator and written to the audit trail, and
-    #: an identifier has no business containing markup or newlines.
-    order_reference: str | None = Field(
-        default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$"
-    )
-    #: Evidence is *derived* from these, never accepted directly. A claim
-    #: cannot assert that a photo exists without naming a reference that an
-    #: investigator could take back to the order system and check.
-    artifacts: list[EvidenceArtifactPayload] = Field(
-        default_factory=list, max_length=16
-    )
-    #: The customer's words. Capped, and quarantined everywhere downstream --
-    #: see RefundClaim.complaint.
-    complaint: str | None = Field(default=None, max_length=2000)
-
-    @property
-    def derived_evidence(self) -> frozenset[str]:
-        return frozenset(artifact.kind.value for artifact in self.artifacts)
 
 
 class ActionAuthorize(BaseModel):
@@ -1215,24 +1167,7 @@ def create_app(
             customer_id=customer_id,
             submitted_by=principal.subject,
             occurred_at=occurred_at,
-            claim=(
-                RefundClaim(
-                    reason=payload.claim.reason,
-                    order_value=payload.claim.order_value,
-                    days_since_delivery=payload.claim.days_since_delivery,
-                    evidence=payload.claim.derived_evidence,
-                    order_reference=payload.claim.order_reference,
-                    artifacts=tuple(
-                        EvidenceArtifact(
-                            kind=artifact.kind, reference=artifact.reference
-                        )
-                        for artifact in payload.claim.artifacts
-                    ),
-                    complaint=payload.claim.complaint,
-                )
-                if payload.claim is not None
-                else None
-            ),
+            claim=payload.claim.to_claim() if payload.claim is not None else None,
         )
         observation_fields(
             agent_id=agent_id,

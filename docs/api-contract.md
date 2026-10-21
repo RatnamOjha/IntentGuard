@@ -54,6 +54,38 @@ Protected connector executes the approved action
 The frontend should use stable finding `code` values for filters and finding
 `message` values for operator-facing explanations.
 
+## Required refund claim context
+
+`refund_order`, `refund_shipping`, and `issue_goodwill_credit` require a
+structured `claim` on authorization. Omission or `null` returns HTTP 200 with
+decision `deny`, finding `CLAIM_REQUIRED`, and no reservation or lease. This
+also applies to chat-generated proposals and older published Rego policies.
+Other action types retain their existing contracts.
+
+For example, a claim accompanying a proposed refund can be:
+
+```json
+{
+  "reason": "defect",
+  "order_value": "380",
+  "days_since_delivery": 2,
+  "order_reference": "ORD-4418",
+  "artifacts": [{"kind": "photo", "reference": "img-4418-a"}]
+}
+```
+
+Reason, positive finite order value, and days since delivery are required.
+The proposed amount remains a separate field. Evidence kinds are derived from
+artifact citations; a separate `evidence` field is rejected. Citations are not
+independently verified evidence. Policy may deny a structurally valid claim or
+permit a different remedy. Malformed supplied claims return HTTP 422.
+
+Model-backed chat may supply this same structure through its proposal tool; the
+response includes it at `proposal.claim`. The scripted planner supplies no claim
+and its refund proposals are denied; use the case form for structured offline
+refund demonstrations. A corrected proposal must use a fresh request ID because
+retries preserve the original decision. See [ADR 008](adr/008-required-refund-claim-context.md).
+
 ## Signed intent registration
 
 The customer submits the exact passport produced by its consent service. The
